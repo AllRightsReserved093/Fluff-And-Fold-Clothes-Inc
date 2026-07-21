@@ -1,0 +1,122 @@
+# Verify the minimal machine and report API routing chain.
+# 验证最小机器与报告 API 路由链路。
+
+import asyncio
+
+from httpx import ASGITransport, AsyncClient
+
+from app.api.routes import register as register_routes
+from app.api.routes import reports as report_routes
+from app.main import app
+
+
+class StubMachineService:
+    def __init__(self) -> None:
+        self.registration_result = True
+        self.deregistration_result = True
+        self.report_result = True
+
+    def machine_register(self, machine_id: str, machine_type: object) -> bool:
+        return self.registration_result
+
+    def machine_deregister(self, machine_id: str) -> bool:
+        return self.deregistration_result
+
+    def handle_periodic_report(self, report: object) -> bool:
+        return self.report_result
+
+    def handle_change_of_state_report(self, report: object) -> bool:
+        return self.report_result
+
+    def handle_error_report(self, report: object) -> bool:
+        return self.report_result
+
+
+async def post_json(path: str, payload: dict[str, object]):
+    transport = ASGITransport(app=app)
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
+        return await client.post(path, json=payload)
+
+
+def test_business_routes_are_exposed() -> None:
+    assert set(app.openapi()["paths"]) == {
+        "/api/v1/health",
+        "/api/v1/machines/register",
+        "/api/v1/machines/deregister",
+        "/api/v1/reports/periodic",
+        "/api/v1/reports/change-of-state",
+        "/api/v1/reports/error",
+    }
+
+
+def test_registration_returns_created_response(monkeypatch) -> None:
+    service = StubMachineService()
+    monkeypatch.setattr(register_routes, "machine_service", service)
+
+    response = asyncio.run(
+        post_json(
+            "/api/v1/machines/register",
+            {
+                "machine_id": "washer-01",
+                "machine_type": "washer",
+                "registered_at": "2026-07-21T12:00:00Z",
+            },
+        )
+    )
+
+    assert response.status_code == 201
+    assert response.json()["machine_id"] == "washer-01"
+    assert response.json()["machine_type"] == "washer"
+
+
+def test_registration_conflict_returns_409(monkeypatch) -> None:
+    service = StubMachineService()
+    service.registration_result = False
+    monkeypatch.setattr(register_routes, "machine_service", service)
+
+    response = asyncio.run(
+        post_json(
+            "/api/v1/machines/register",
+            {
+                "machine_id": "washer-01",
+                "machine_type": "washer",
+                "registered_at": "2026-07-21T12:00:00Z",
+            },
+        )
+    )
+
+    assert response.status_code == 409
+
+
+def test_periodic_report_returns_accepted_response(monkeypatch) -> None:
+    service = StubMachineService()
+    monkeypatch.setattr(report_routes, "machine_service", service)
+
+    response = asyncio.run(
+        post_json(
+            "/api/v1/reports/periodic",
+            {
+                "machine_id": "washer-01",
+                "machine_type": "washer",
+                "report_id": "report-01",
+                "recorded_at": "2026-07-21T12:00:00Z",
+                "operation_state": "running",
+                "cycle_stage": "washing",
+                "general_sensor_readings": {
+                    "vibration": 1.2,
+                    "door_locked": True,
+                },
+                "special_sensor_readings": {
+                    "water_level": 50.0,
+                    "water_temperature": 40.0,
+                },
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response.json()["report_id"] == "report-01"
+    assert response.json()["is_duplicate"] is False

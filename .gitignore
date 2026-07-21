@@ -8,7 +8,9 @@ pytest-cache-files-*/
 .ruff_cache/
 .coverage
 htmlcov/
+*.db
+*.sqlite
+*.sqlite3
 .env
 .idea/
 .vscode/
-
