@@ -27,6 +27,15 @@ class MachineService:
         self.machine_monitor = machine_monitor if machine_monitor is not None else MachineMonitor(self.handle_heartbeat_timeout)
         self.machines_lock = Lock()
 
+    # Record a valid device contact and recover it when previously offline.
+    # 记录一次有效设备联系，并在机器此前离线时恢复上线。
+    def _record_machine_contact(self, machine: Machine) -> None:
+        if machine.is_online:
+            machine.mark_online()
+            return
+
+        machine.recover_online()
+
 
     # Register one machine and add it to heartbeat monitoring.
     # 注册一台机器，并将其加入心跳监控。
@@ -71,7 +80,7 @@ class MachineService:
                 print(f"Machine with ID {report.machine_id} was not registered.")
                 return False
 
-            machine.mark_online()
+            self._record_machine_contact(machine)
             machine.update_state(
                 report.operation_state,
                 report.cycle_stage,
@@ -88,13 +97,11 @@ class MachineService:
             if machine is None:
                 return False
 
-            machine.mark_online()
+            self._record_machine_contact(machine)
             machine.update_state(
                 report.new_operation_state,
                 report.new_cycle_stage,
             )
-
-            # Update log
 
             self.machine_monitor.update_machine(report.machine_id)
             return True
@@ -105,7 +112,7 @@ class MachineService:
             if machine is None:
                 return False
 
-            machine.mark_online()
+            self._record_machine_contact(machine)
             machine_error = MachineError(
                 error_id=report.error_id,
                 error_code=report.error_code,

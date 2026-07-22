@@ -62,6 +62,29 @@ class Machine:
     # 将机器标记为离线，同时保留最后在线时间。
     def mark_offline(self) -> None:
         self.is_online = False
+
+    # Restore an offline machine and clear only active heartbeat errors.
+    # 恢复离线机器，并且只解除活动的心跳超时错误。
+    def recover_online(self) -> None:
+        self.mark_online()
+        self.resolve_heartbeat_timeout()
+
+    # Resolve active heartbeat errors while preserving other machine errors.
+    # 解除活动的心跳超时错误，同时保留机器的其他错误。
+    def resolve_heartbeat_timeout(self) -> None:
+        resolved_at = datetime.now(UTC)
+
+        for error_id, error in list(self.error_list.items()):
+            if (
+                error.error_code != MachineErrorCode.HEARTBEAT_TIMEOUT
+                or not error.is_active
+            ):
+                continue
+
+            error.resolved_at = resolved_at
+            del self.error_list[error_id]
+
+        self.is_error = bool(self.error_list)
     
     def register(self):
         self.is_registered = True

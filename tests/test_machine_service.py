@@ -138,6 +138,11 @@ def test_change_report_and_heartbeat_timeout_update_machine() -> None:
     assert heartbeat_error.error_code == MachineErrorCode.HEARTBEAT_TIMEOUT
     assert heartbeat_error.error_source is ErrorSource.HEARTBEAT_MONITOR
 
+    assert service.handle_change_of_state_report(report)
+    assert machine.is_online
+    assert not machine.is_error
+    assert not machine.error_list
+
 
 def test_error_report_adds_machine_error() -> None:
     monitor = StubMachineMonitor()
@@ -168,3 +173,10 @@ def test_error_report_adds_machine_error() -> None:
     assert machine.is_online
     assert machine.error_list["door-error-01"].raised_at == report.recorded_at
     assert monitor.updated_machine_ids == ["washer-01"]
+
+    assert service.handle_heartbeat_timeout("washer-01")
+    machine.recover_online()
+
+    assert machine.is_online
+    assert set(machine.error_list) == {"door-error-01"}
+    assert machine.is_error

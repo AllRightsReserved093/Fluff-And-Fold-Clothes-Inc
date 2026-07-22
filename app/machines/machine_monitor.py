@@ -4,7 +4,7 @@
 import heapq
 
 from collections.abc import Callable
-from threading import Event, Lock, Thread
+from threading import Condition, Event, Lock, Thread
 from time import monotonic_ns
 
 
@@ -19,17 +19,16 @@ HEARTBEAT_TIMEOUT_MILLISECONDS = 16_000
 def monotonic_milliseconds() -> int:
     return monotonic_ns() // 1_000_000
 
+
 class MachineMonitor:
-    # A queue to hold the machines being monitored
+    # A queue to hold the machines being monitored.
     # (deadline_milliseconds, machine_id)
     is_working: bool = False
     monitor_heapq: list[tuple[int, str]]
-
     stop_event: Event
     monitor_thread: Thread | None
-    # Protect all reads and writes to the monitor heap.
-    # 保护监控堆的所有读取和写入操作。
     monitor_heap_lock: Lock
+    monitor_condition: Condition
     on_timeout: Callable[[str], object]
 
     def __init__(self, on_timeout: Callable[[str], object]):
@@ -37,54 +36,86 @@ class MachineMonitor:
         self.monitor_thread = None
         self.monitor_heapq = []
         self.monitor_heap_lock = Lock()
+        self.monitor_condition = Condition(self.monitor_heap_lock)
         self.on_timeout = on_timeout
 
-    def add_machine(self, machine):
-        # Add a machine to the monitor queue
-        with self.monitor_heap_lock:
-            deadline_milliseconds = (monotonic_milliseconds() + HEARTBEAT_TIMEOUT_MILLISECONDS)
+    def add_machine(self, machine) -> None:
+        with self.monitor_condition:
+            deadline_milliseconds = (
+                monotonic_milliseconds()
+                + HEARTBEAT_TIMEOUT_MILLISECONDS
+            )
+            heapq.heappush(
+                self.monitor_heapq,
+                (deadline_milliseconds, machine.machine_id),
+            )
+            self.monitor_condition.notify()
 
-            heapq.heappush(self.monitor_heapq, (deadline_milliseconds, machine.machine_id))
-        
-    def remove_machine(self, machine_id_to_remove):
-        with self.monitor_heap_lock:
-            for i, (_, machine_id) in enumerate(self.monitor_heapq):
-                if machine_id == machine_id_to_remove:
-                    del self.monitor_heapq[i]
-                    heapq.heapify(self.monitor_heapq)
-                    break
-        
-    def start_monitor(self):
-        if (self.monitor_thread is not None and self.monitor_thread.is_alive()):
+    def remove_machine(self, machine_id_to_remove: str) -> None:
+        with self.monitor_condition:
+            for index, (_, machine_id) in enumerate(self.monitor_heapq):
+                if machine_id != machine_id_to_remove:
+                    continue
+
+                del self.monitor_heapq[index]
+                heapq.heapify(self.monitor_heapq)
+                self.monitor_condition.notify()
+                return
+
+    def start_monitor(self) -> None:
+        if (
+            self.monitor_thread is not None
+            and self.monitor_thread.is_alive()
+        ):
             return
 
-        # monitor thread setup
         self.stop_event.clear()
-        self.monitor_thread = Thread(target=self.monitor_machines, daemon=True)
+        self.monitor_thread = Thread(
+            target=self.monitor_machines,
+            daemon=True,
+        )
         self.is_working = True
         self.monitor_thread.start()
 
-    # Update the deadline for a specific machine
-    # In the most of the cases, the machine that is being updated is at the top of the heap.
-    # In those cases, the overall time complexity should be O(log n)
-    def update_machine(self, machine_id_to_update: str):
-        with self.monitor_heap_lock:
-            deadline_milliseconds = (monotonic_milliseconds() + HEARTBEAT_TIMEOUT_MILLISECONDS)
-            for i, (_, machine_id) in enumerate(self.monitor_heapq):
-                if machine_id == machine_id_to_update:
-                    # Update the machine's deadline
-                    if i == 0:
-                        # This machine is at the top of the heap
-                        _ = heapq.heappop(self.monitor_heapq)
-                        heapq.heappush(self.monitor_heapq, (deadline_milliseconds, machine_id))
-                    else:
-                        # This machine is not at the top of the heap
-                        self.monitor_heapq[i] = (deadline_milliseconds, machine_id)
-                        heapq.heapify(self.monitor_heapq)
-                    break
-        
-    def end_monitor(self):
-        self.stop_event.set()
+    # Refresh an existing deadline or reinsert a machine after timeout.
+    # 刷新已有截止时间，或在机器超时后将其重新插入。
+    def update_machine(self, machine_id_to_update: str) -> None:
+        with self.monitor_condition:
+            deadline_milliseconds = (
+                monotonic_milliseconds()
+                + HEARTBEAT_TIMEOUT_MILLISECONDS
+            )
+
+            for index, (_, machine_id) in enumerate(self.monitor_heapq):
+                if machine_id != machine_id_to_update:
+                    continue
+
+                if index == 0:
+                    heapq.heappop(self.monitor_heapq)
+                    heapq.heappush(
+                        self.monitor_heapq,
+                        (deadline_milliseconds, machine_id),
+                    )
+                else:
+                    self.monitor_heapq[index] = (
+                        deadline_milliseconds,
+                        machine_id,
+                    )
+                    heapq.heapify(self.monitor_heapq)
+
+                self.monitor_condition.notify()
+                return
+
+            heapq.heappush(
+                self.monitor_heapq,
+                (deadline_milliseconds, machine_id_to_update),
+            )
+            self.monitor_condition.notify()
+
+    def end_monitor(self) -> None:
+        with self.monitor_condition:
+            self.stop_event.set()
+            self.monitor_condition.notify_all()
 
         if self.monitor_thread is not None:
             self.monitor_thread.join()
@@ -92,47 +123,41 @@ class MachineMonitor:
 
         self.is_working = False
 
-    # The main monitoring loop
-    def monitor_machines(self):
-        with self.monitor_heap_lock:
-            if not self.monitor_heapq:
-                self.is_working = False
-                return
-        
-        while not self.stop_event.is_set():
-            timeout_machine_id = None
+    # Wait for the next deadline while remaining alive when the heap is empty.
+    # 等待下一个截止时间，并在堆为空时保持线程存活。
+    def monitor_machines(self) -> None:
+        try:
+            while not self.stop_event.is_set():
+                timeout_machine_id = None
 
-            with self.monitor_heap_lock:
-                if not self.monitor_heapq:
-                    break
+                with self.monitor_condition:
+                    while (
+                        not self.monitor_heapq
+                        and not self.stop_event.is_set()
+                    ):
+                        self.monitor_condition.wait()
 
-                # Check the status of each machine
-                next_deadline, _ = self.monitor_heapq[0]
-                remaining_milliseconds = (
-                    next_deadline - monotonic_milliseconds()
-                )
+                    if self.stop_event.is_set():
+                        break
 
-                if remaining_milliseconds <= 0:
-                    # Machine is not responding
-                    # 设置机器为离线状态
-                    _, timeout_machine_id = heapq.heappop(self.monitor_heapq)
+                    next_deadline, _ = self.monitor_heapq[0]
+                    remaining_milliseconds = (
+                        next_deadline - monotonic_milliseconds()
+                    )
 
-            # Notify the service only after releasing the monitor heap lock.
-            # 仅在释放监控堆锁后通知服务。
-            if timeout_machine_id is not None:
-                self.on_timeout(timeout_machine_id)
+                    if remaining_milliseconds > 0:
+                        self.monitor_condition.wait(
+                            timeout=remaining_milliseconds / 1_000
+                        )
+                        continue
 
-            if remaining_milliseconds > 0:
-                # Deadline not passed
-                if self.stop_event.wait(
-                    remaining_milliseconds / 1_000
-                ):
-                    break
+                    _, timeout_machine_id = heapq.heappop(
+                        self.monitor_heapq
+                    )
 
-                continue
-            else:
-                continue
-
-        # The monitoring thread has stopped.
-        # 监控线程已经停止。
-        self.is_working = False
+                # Notify the service only after releasing the heap lock.
+                # 仅在释放监控堆锁后通知服务。
+                if timeout_machine_id is not None:
+                    self.on_timeout(timeout_machine_id)
+        finally:
+            self.is_working = False

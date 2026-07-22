@@ -2,6 +2,7 @@
 # 验证 UTC 时间归一化与单调毫秒 deadline。
 
 from datetime import UTC
+from threading import Event
 from time import monotonic
 from types import SimpleNamespace
 
@@ -56,7 +57,10 @@ def test_monitor_waits_until_millisecond_deadline(
         "HEARTBEAT_TIMEOUT_MILLISECONDS",
         30,
     )
-    monitor = monitor_module.MachineMonitor(lambda _machine_id: None)
+    timeout_event = Event()
+    monitor = monitor_module.MachineMonitor(
+        lambda _machine_id: timeout_event.set()
+    )
     monitor.add_machine(SimpleNamespace(machine_id="test-machine"))
 
     started = monotonic()
@@ -64,12 +68,17 @@ def test_monitor_waits_until_millisecond_deadline(
     thread = monitor.monitor_thread
 
     assert thread is not None
-    thread.join(timeout=1)
-    elapsed_milliseconds = (monotonic() - started) * 1_000
+    try:
+        assert timeout_event.wait(timeout=1)
+        elapsed_milliseconds = (monotonic() - started) * 1_000
+
+        assert thread.is_alive()
+        assert elapsed_milliseconds >= 25
+        assert elapsed_milliseconds < 1_000
+    finally:
+        monitor.end_monitor()
 
     assert not thread.is_alive()
-    assert elapsed_milliseconds >= 25
-    assert elapsed_milliseconds < 1_000
 
 
 def test_timeout_callback_runs_after_monitor_lock_is_released(
@@ -81,12 +90,14 @@ def test_timeout_callback_runs_after_monitor_lock_is_released(
         0,
     )
     lock_was_available: list[bool] = []
+    timeout_event = Event()
 
     def on_timeout(_machine_id: str) -> None:
         lock_acquired = monitor.monitor_heap_lock.acquire(blocking=False)
         lock_was_available.append(lock_acquired)
         if lock_acquired:
             monitor.monitor_heap_lock.release()
+        timeout_event.set()
 
     monitor = monitor_module.MachineMonitor(on_timeout)
     monitor.add_machine(SimpleNamespace(machine_id="test-machine"))
@@ -94,6 +105,54 @@ def test_timeout_callback_runs_after_monitor_lock_is_released(
     thread = monitor.monitor_thread
 
     assert thread is not None
-    thread.join(timeout=1)
+    try:
+        assert timeout_event.wait(timeout=1)
+        assert thread.is_alive()
+        assert lock_was_available == [True]
+    finally:
+        monitor.end_monitor()
+
     assert not thread.is_alive()
-    assert lock_was_available == [True]
+
+
+def test_monitor_waits_on_empty_heap_and_wakes_for_upsert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        monitor_module,
+        "HEARTBEAT_TIMEOUT_MILLISECONDS",
+        20,
+    )
+    timed_out_machine_ids: list[str] = []
+    timeout_event = Event()
+
+    def on_timeout(machine_id: str) -> None:
+        timed_out_machine_ids.append(machine_id)
+        timeout_event.set()
+
+    monitor = monitor_module.MachineMonitor(on_timeout)
+    monitor.start_monitor()
+    thread = monitor.monitor_thread
+
+    assert thread is not None
+
+    try:
+        assert thread.is_alive()
+        monitor.update_machine("recovered-machine")
+        assert timeout_event.wait(timeout=1)
+        assert timed_out_machine_ids == ["recovered-machine"]
+        assert thread.is_alive()
+    finally:
+        monitor.end_monitor()
+
+    assert not thread.is_alive()
+
+
+def test_update_machine_does_not_create_duplicate_entries() -> None:
+    monitor = monitor_module.MachineMonitor(lambda _machine_id: None)
+
+    monitor.update_machine("washer-01")
+    monitor.update_machine("washer-01")
+
+    assert len(monitor.monitor_heapq) == 1
+    assert monitor.monitor_heapq[0][1] == "washer-01"
