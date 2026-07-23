@@ -5,6 +5,7 @@ import asyncio
 
 from httpx import ASGITransport, AsyncClient
 
+from app.api.routes import faults as fault_routes
 from app.api.routes import register as register_routes
 from app.api.routes import reports as report_routes
 from app.main import app
@@ -15,6 +16,7 @@ class StubMachineService:
         self.registration_result = True
         self.deregistration_result = True
         self.report_result = True
+        self.acknowledgement_result = True
 
     def machine_register(self, machine_id: str, machine_type: object) -> bool:
         return self.registration_result
@@ -30,6 +32,12 @@ class StubMachineService:
 
     def handle_error_report(self, report: object) -> bool:
         return self.report_result
+
+    def handle_error_resolution_report(self, report: object) -> bool:
+        return self.report_result
+
+    def acknowledge_error(self, machine_id: str, error_id: str) -> bool:
+        return self.acknowledgement_result
 
 
 async def post_json(path: str, payload: dict[str, object]):
@@ -49,6 +57,14 @@ def test_business_routes_are_exposed() -> None:
         "/api/v1/reports/periodic",
         "/api/v1/reports/change-of-state",
         "/api/v1/reports/error",
+        "/api/v1/reports/error-resolution",
+        "/api/v1/machines",
+        "/api/v1/machines/{machine_id}",
+        "/api/v1/machines/{machine_id}/readings",
+        "/api/v1/faults",
+        "/api/v1/machines/{machine_id}/faults",
+        "/api/v1/machines/{machine_id}/faults/{error_id}/acknowledge",
+        "/api/v1/machines/{machine_id}/faults/{error_id}/resolve",
     }
 
 
@@ -120,3 +136,59 @@ def test_periodic_report_returns_accepted_response(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["report_id"] == "report-01"
     assert response.json()["is_duplicate"] is False
+
+
+def test_fault_acknowledgement_returns_acknowledged_response(monkeypatch) -> None:
+    service = StubMachineService()
+    monkeypatch.setattr(fault_routes, "machine_service", service)
+
+    response = asyncio.run(
+        post_json(
+            "/api/v1/machines/washer-01/faults/door-error-01/acknowledge",
+            {},
+        )
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "machine_id": "washer-01",
+        "error_id": "door-error-01",
+        "is_acknowledged": True,
+    }
+
+
+def test_fault_acknowledgement_returns_not_found(monkeypatch) -> None:
+    service = StubMachineService()
+    service.acknowledgement_result = False
+    monkeypatch.setattr(fault_routes, "machine_service", service)
+
+    response = asyncio.run(
+        post_json(
+            "/api/v1/machines/washer-01/faults/missing-error/acknowledge",
+            {},
+        )
+    )
+
+    assert response.status_code == 404
+
+
+def test_error_resolution_report_returns_accepted_response(monkeypatch) -> None:
+    service = StubMachineService()
+    monkeypatch.setattr(report_routes, "machine_service", service)
+
+    response = asyncio.run(
+        post_json(
+            "/api/v1/reports/error-resolution",
+            {
+                "machine_id": "washer-01",
+                "machine_type": "washer",
+                "report_id": "resolution-01",
+                "recorded_at": "2026-07-22T12:01:00Z",
+                "error_id": "door-error-01",
+                "resolution_message": "Door lock recovered",
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response.json()["report_id"] == "resolution-01"

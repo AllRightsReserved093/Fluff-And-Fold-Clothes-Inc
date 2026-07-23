@@ -3,7 +3,7 @@
 
 from datetime import UTC, datetime
 import enum
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import (
     AwareDatetime,
@@ -78,6 +78,13 @@ class DryerCyclePhase(str, enum.Enum):
 class ErrorSource(str, enum.Enum):
     DEVICE = "device"
     HEARTBEAT_MONITOR = "heartbeat_monitor"
+    ANALYTICS = "analytics"
+
+
+class StateEventSource(str, enum.Enum):
+    CHANGE_OF_STATE_REPORT = "change_of_state_report"
+    PERIODIC_RECONCILIATION = "periodic_reconciliation"
+    ERROR_REPORT = "error_report"
     ANALYTICS = "analytics"
 
 
@@ -170,6 +177,7 @@ class BaseErrorReport(BaseMachineReport):
     error_code: ErrorCode
     error_message: MessageText | None = None
     error_source: ErrorSource
+    
     general_sensor_readings: GeneralSensorReadings
 
     change_of_state: bool = False
@@ -257,6 +265,60 @@ class ReportAcceptedResponse(BaseAcceptedResponse):
     is_duplicate: bool = False
 
 
+class FaultAcknowledgementResponse(ContractModel):
+    machine_id: Identifier
+    error_id: Identifier
+    is_acknowledged: Literal[True]
+
+
+class FaultResolutionRequest(ContractModel):
+    resolution_message: MessageText | None = None
+
+
+class FaultResolutionResponse(ContractModel):
+    machine_id: Identifier
+    error_id: Identifier
+    is_resolved: Literal[True]
+
+
+class MachineStatusResponse(ContractModel):
+    machine_id: Identifier
+    machine_type: MachineType
+    is_registered: bool
+    is_online: bool
+    operation_state: OperationState | None
+    cycle_stage: str | None
+    registered_at: datetime | None
+    last_online: datetime | None
+    recorded_at: datetime | None
+
+
+class SensorReadingResponse(ContractModel):
+    reading_id: int
+    machine_id: Identifier
+    report_id: Identifier
+    recorded_at: datetime
+    received_at: datetime
+    operation_state: OperationState | None
+    cycle_stage: str | None
+    general_readings: dict[str, Any]
+    special_readings: dict[str, Any]
+
+
+class FaultEventResponse(ContractModel):
+    fault_event_id: int
+    machine_id: Identifier
+    report_id: Identifier | None
+    error_id: Identifier
+    error_code: ErrorCode
+    error_message: MessageText | None
+    error_source: ErrorSource
+    is_acknowledged: bool
+    raised_at: datetime
+    resolved_at: datetime | None
+    resolution_message: MessageText | None
+
+
 # --------- Error State ----------
 
 # Represent one server-side error record derived from device or server events.
@@ -266,6 +328,7 @@ class MachineError(ContractModel):
     error_code: ErrorCode
     error_message: MessageText | None = None
     error_source: ErrorSource
+    is_acknowledged: bool = False
     raised_at: AwareDatetime
     resolved_at: AwareDatetime | None = None
 

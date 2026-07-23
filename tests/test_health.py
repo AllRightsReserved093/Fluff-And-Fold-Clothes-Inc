@@ -5,7 +5,10 @@ import asyncio
 
 from httpx import ASGITransport, AsyncClient, Response
 
-from app.main import app
+from app import main as main_module
+
+
+app = main_module.app
 
 
 # Send a request without starting a network server.
@@ -24,3 +27,21 @@ def test_health_check() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_application_lifespan_initializes_database(monkeypatch) -> None:
+    initialization_calls: list[bool] = []
+    monkeypatch.setattr(
+        main_module,
+        "initialize_database",
+        lambda: initialization_calls.append(True),
+    )
+    test_application = main_module.create_app()
+
+    async def run_lifespan() -> None:
+        async with test_application.router.lifespan_context(test_application):
+            pass
+
+    asyncio.run(run_lifespan())
+
+    assert initialization_calls == [True]

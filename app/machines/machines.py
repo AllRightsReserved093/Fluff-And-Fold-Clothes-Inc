@@ -27,10 +27,8 @@ class Machine:
     error_list: dict[str, MachineError]
     
     is_registered: bool
-    first_registered: datetime | None
     last_online: datetime | None
     last_updated: datetime | None
-    last_deregistered: datetime | None
 
     def __init__(self, machine_id: str, machine_type: MachineType):
         self.machine_id = machine_id
@@ -44,10 +42,11 @@ class Machine:
         self.error_list = {}
 
         self.is_registered = False
-        self.first_registered = None
+
         self.last_online = None
         self.last_updated = None
-        self.last_deregistered = None
+
+
 
     def __str__(self):
         return f"Machine(id={self.machine_id}, type={self.machine_type}, online={self.is_online})"
@@ -88,14 +87,12 @@ class Machine:
     
     def register(self):
         self.is_registered = True
-        self.first_registered = datetime.now(UTC)
         self.mark_online()
 
     # Deregister the machine, remove from the machine list
     def deregister(self):
         self.mark_offline()
         self.is_registered = False
-        self.last_deregistered = datetime.now(UTC)
         self.operation_state = None
         self.cycle_stage = None
     
@@ -144,7 +141,6 @@ class Machine:
 
         if not self.error_list:
             self.is_error = False
-
 
 
 

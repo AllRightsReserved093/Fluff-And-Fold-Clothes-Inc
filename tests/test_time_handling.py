@@ -1,7 +1,6 @@
 # Verify UTC timestamp normalization and monotonic millisecond deadlines.
 # 验证 UTC 时间归一化与单调毫秒 deadline。
 
-from datetime import UTC
 from threading import Event
 from time import monotonic
 from types import SimpleNamespace
@@ -11,8 +10,7 @@ from pydantic import ValidationError
 
 import app.machines.machine_monitor as monitor_module
 from app.machines.machine_monitor import monotonic_milliseconds
-from app.machines.machines import Machine
-from laundry_contracts.contracts import MachineType, RegistrationRequest
+from laundry_contracts.contracts import RegistrationRequest
 
 
 def test_registration_time_is_normalized_to_utc() -> None:
@@ -32,15 +30,6 @@ def test_registration_time_requires_timezone() -> None:
             machine_type="washer",
             registered_at="2026-07-20T12:00:00",
         )
-
-
-def test_machine_uses_utc_registration_time() -> None:
-    machine = Machine("washer-01", MachineType.WASHER)
-
-    machine.register()
-
-    assert machine.first_registered is not None
-    assert machine.first_registered.tzinfo is UTC
 
 
 def test_monotonic_time_is_expressed_as_integer_milliseconds() -> None:

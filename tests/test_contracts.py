@@ -232,6 +232,7 @@ def test_machine_error_tracks_active_and_resolved_lifecycle() -> None:
     )
 
     assert active_error.is_active
+    assert not active_error.is_acknowledged
     assert not resolved_error.is_active
 
     with pytest.raises(ValidationError):

@@ -115,7 +115,7 @@ class MachineMonitor:
     def end_monitor(self) -> None:
         with self.monitor_condition:
             self.stop_event.set()
-            self.monitor_condition.notify_all()
+            self.monitor_condition.notify()
 
         if self.monitor_thread is not None:
             self.monitor_thread.join()

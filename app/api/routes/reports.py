@@ -9,6 +9,7 @@ from app.services.machine_service import machine_service
 from laundry_contracts.contracts import (
     ChangeOfStateReport,
     ErrorReport,
+    ErrorResolutionReport,
     PeriodicReport,
     ReportAcceptedResponse,
 )
@@ -63,6 +64,18 @@ def receive_error_report(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Machine is not registered",
         )
+
+    return ReportAcceptedResponse(
+        machine_id=report.machine_id,
+        report_id=report.report_id,
+        accepted_at=datetime.now(UTC),
+    )
+
+
+@router.post("/error-resolution", response_model=ReportAcceptedResponse)
+def receive_error_resolution_report(report: ErrorResolutionReport) -> ReportAcceptedResponse:
+    if not machine_service.handle_error_resolution_report(report):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Machine or fault not found")
 
     return ReportAcceptedResponse(
         machine_id=report.machine_id,

@@ -1,5 +1,5 @@
-# Define persistent models for machines, sensor readings, and fault events.
-# 定义机器、传感器读数和故障事件的持久化模型。
+# Define persistent models for machines, state events, sensor readings, and faults.
+# 定义机器、状态事件、传感器读数和故障的持久化模型。
 
 from datetime import datetime
 from typing import Any
@@ -24,12 +24,13 @@ from laundry_contracts.contracts import (
     ErrorSource,
     MachineType,
     OperationState,
+    StateEventSource,
 )
 
 
 # --------- Machines ---------
 
-
+# Storage of current machine state
 class MachineRecord(Base):
     __tablename__ = "machines"
 
@@ -49,6 +50,8 @@ class MachineRecord(Base):
         nullable=False,
         default=False,
     )
+    registered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     operation_state: Mapped[OperationState | None] = mapped_column(
         Enum(
             OperationState,
@@ -59,26 +62,94 @@ class MachineRecord(Base):
         )
     )
     cycle_stage: Mapped[str | None] = mapped_column(String(64))
-    registered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_reported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.current_timestamp(),
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default=func.current_timestamp(),
-        onupdate=func.current_timestamp(),
-    )
+
+    # Server-observed last contact time, separate from the device event time.
+    # 服务端观察到的最后联系时间，与设备事件时间分开保存。
+    last_online: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     sensor_readings: Mapped[list["SensorReadingRecord"]] = relationship(
+        back_populates="machine"
+    )
+    state_events: Mapped[list["MachineStateEventRecord"]] = relationship(
         back_populates="machine"
     )
     fault_events: Mapped[list["FaultEventRecord"]] = relationship(
         back_populates="machine"
     )
+
+
+# --------- Machine State Events ---------
+
+
+class MachineStateEventRecord(Base):
+    __tablename__ = "machine_state_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "machine_id",
+            "report_id",
+            name="uq_machine_state_events_machine_report",
+        ),
+        Index(
+            "ix_machine_state_events_machine_recorded_at",
+            "machine_id",
+            "recorded_at",
+        ),
+    )
+
+    state_event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    machine_id: Mapped[str] = mapped_column(
+        ForeignKey("machines.machine_id"),
+        nullable=False,
+    )
+    report_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_source: Mapped[StateEventSource] = mapped_column(
+        Enum(
+            StateEventSource,
+            name="state_event_source",
+            native_enum=False,
+            create_constraint=True,
+            values_callable=lambda members: [member.value for member in members],
+        ),
+        nullable=False,
+    )
+
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
+
+    previous_operation_state: Mapped[OperationState] = mapped_column(
+        Enum(
+            OperationState,
+            name="previous_machine_operation_state",
+            native_enum=False,
+            create_constraint=True,
+            values_callable=lambda members: [member.value for member in members],
+        ),
+        nullable=False,
+    )
+    new_operation_state: Mapped[OperationState] = mapped_column(
+        Enum(
+            OperationState,
+            name="new_machine_operation_state",
+            native_enum=False,
+            create_constraint=True,
+            values_callable=lambda members: [member.value for member in members],
+        ),
+        nullable=False,
+    )
+    previous_cycle_stage: Mapped[str | None] = mapped_column(String(64))
+    new_cycle_stage: Mapped[str | None] = mapped_column(String(64))
+
+    reason: Mapped[str | None] = mapped_column(Text)
+
+    machine: Mapped[MachineRecord] = relationship(back_populates="state_events")
 
 
 # --------- Sensor Readings ---------
@@ -105,6 +176,7 @@ class SensorReadingRecord(Base):
         nullable=False,
     )
     report_id: Mapped[str] = mapped_column(String(128), nullable=False)
+
     recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -114,7 +186,8 @@ class SensorReadingRecord(Base):
         nullable=False,
         server_default=func.current_timestamp(),
     )
-    operation_state: Mapped[OperationState] = mapped_column(
+
+    operation_state: Mapped[OperationState | None] = mapped_column(
         Enum(
             OperationState,
             name="sensor_reading_operation_state",
@@ -122,9 +195,10 @@ class SensorReadingRecord(Base):
             create_constraint=True,
             values_callable=lambda members: [member.value for member in members],
         ),
-        nullable=False,
+        nullable=True,
     )
     cycle_stage: Mapped[str | None] = mapped_column(String(64))
+
     general_readings: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     special_readings: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
@@ -157,12 +231,13 @@ class FaultEventRecord(Base):
     )
 
     fault_event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    error_id: Mapped[str] = mapped_column(String(128), nullable=False)
     machine_id: Mapped[str] = mapped_column(
         ForeignKey("machines.machine_id"),
         nullable=False,
     )
     report_id: Mapped[str | None] = mapped_column(String(128))
+    error_id: Mapped[str] = mapped_column(String(128), nullable=False)
+
     error_code: Mapped[str] = mapped_column(String(128), nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text)
     error_source: Mapped[ErrorSource] = mapped_column(
@@ -175,12 +250,15 @@ class FaultEventRecord(Base):
         ),
         nullable=False,
     )
+    is_acknowledged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
     raised_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
     )
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolution_message: Mapped[str | None] = mapped_column(Text)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

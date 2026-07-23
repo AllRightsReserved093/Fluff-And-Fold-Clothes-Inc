@@ -53,7 +53,6 @@ def test_register_machine_rejects_empty_and_duplicate_ids() -> None:
     assert not service.machine_register("", MachineType.WASHER)
 
     machine = service.machines_registry["washer-01"]
-    assert machine.first_registered is not None
     assert machine.is_online
     assert machine.last_online is not None
     assert machine.last_online.tzinfo is UTC

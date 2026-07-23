@@ -34,10 +34,7 @@ SessionFactory = sessionmaker(
 # Enforce declared foreign keys for every SQLite connection.
 # 为每个 SQLite 连接启用已声明的外键约束。
 @event.listens_for(Engine, "connect")
-def enable_sqlite_foreign_keys(
-    database_connection: Any,
-    _connection_record: Any,
-) -> None:
+def enable_sqlite_foreign_keys(database_connection: Any,_connection_record: Any) -> None:
     if not isinstance(database_connection, SQLiteConnection):
         return
 
