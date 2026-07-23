@@ -186,6 +186,16 @@ def test_error_resolution_report_returns_accepted_response(monkeypatch) -> None:
                 "recorded_at": "2026-07-22T12:01:00Z",
                 "error_id": "door-error-01",
                 "resolution_message": "Door lock recovered",
+                "operation_state": "idle",
+                "cycle_stage": None,
+                "general_sensor_readings": {
+                    "vibration": 0.1,
+                    "door_locked": False,
+                },
+                "special_sensor_readings": {
+                    "water_level": 0.0,
+                    "water_temperature": 20.0,
+                },
             },
         )
     )

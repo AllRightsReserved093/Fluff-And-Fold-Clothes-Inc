@@ -8,6 +8,7 @@ import httpx
 from pydantic import BaseModel
 
 from laundry_contracts.contracts import DeregistrationRequest, DryerCyclePhase, MachineType, OperationState, RegistrationRequest, WasherCyclePhase
+from simulator.faults import FaultState, MachineFault
 
 
 REPORT_INTERVAL_SECONDS = 15.0
@@ -32,6 +33,7 @@ class Machine:
         self.next_report_at = 0.0
         self.vibration = 0.1
         self.door_locked = False
+        self.active_fault: MachineFault | None = None
 
     # Advance the current phase timer and report whether its duration was reached.
     # 推进当前阶段计时，并返回是否已经达到阶段时长。
@@ -68,3 +70,18 @@ class Machine:
 
     def new_report_id(self, report_type: str) -> str:
         return f"{report_type}-{uuid4()}"
+
+    # Start repairing the active fault when the machine is ready for repair.
+    # 当机器处于可维修状态时，开始修复当前故障。
+    def repair(self) -> bool:
+        if self.operation_state is not OperationState.FAULTED or self.active_fault is None:
+            print(f"[{self.machine_id}] No repairable fault is active")
+            return False
+
+        if self.active_fault.state is FaultState.REPAIRING:
+            print(f"[{self.machine_id}] Repair is already in progress")
+            return False
+
+        self.active_fault.start_repair()
+        print(f"[{self.machine_id}] Repair started")
+        return True

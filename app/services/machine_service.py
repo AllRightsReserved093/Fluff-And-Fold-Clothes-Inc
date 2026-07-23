@@ -38,6 +38,11 @@ class MachineService:
         self.machines_lock = Lock()
         self.database_operation = DatabaseOperation()
 
+    # Stop the heartbeat monitor owned by this service.
+    # 停止当前服务持有的心跳监控器。
+    def shutdown(self) -> None:
+        self.machine_monitor.end_monitor()
+
     # Record a valid device contact and recover it when previously offline.
     # 记录一次有效设备联系，并在机器此前离线时恢复上线。
     def _record_machine_contact(self, machine: Machine) -> None:
@@ -46,6 +51,9 @@ class MachineService:
             return
 
         machine.recover_online()
+
+    def machine_monitor_shutdown(self) -> None:
+        self.machine_monitor.end_monitor()
 
 
     # Register one machine and add it to heartbeat monitoring.
@@ -206,18 +214,29 @@ class MachineService:
             if machine is None:
                 return False
 
+            detected_sensor_faults = detect_sensor_faults(report)
+
             # Database operation
             with SessionFactory.begin() as database_session:
-                if not self.database_operation.resolve_fault_event(database_session, report.machine_id, report.error_id, report.recorded_at, report.resolution_message):
+                if not self.database_operation.add_error_resolution_report(database_session, report):
                     return False
                 self.database_operation.update_machine_contact(database_session, report.machine_id, report.recorded_at)
                 if not machine.is_online:
                     self.database_operation.resolve_heartbeat_timeout(database_session, report.machine_id, datetime.now(UTC))
+                active_sensor_faults, resolved_sensor_fault_ids = self.database_operation.reconcile_sensor_faults(database_session, report, detected_sensor_faults, SENSOR_FAULT_ERROR_CODES)
 
             # Update the machine state
             self._record_machine_contact(machine)
             if report.error_id in machine.error_list:
                 machine.remove_error(report.error_id)
+
+            for sensor_fault in active_sensor_faults:
+                if sensor_fault.error_id not in machine.error_list:
+                    machine.add_error(sensor_fault)
+
+            for error_id in resolved_sensor_fault_ids:
+                if error_id in machine.error_list:
+                    machine.remove_error(error_id)
 
             # Update the machine in the monitor
             self.machine_monitor.update_machine(report.machine_id)

@@ -31,10 +31,16 @@ def test_health_check() -> None:
 
 def test_application_lifespan_initializes_database(monkeypatch) -> None:
     initialization_calls: list[bool] = []
+    shutdown_calls: list[bool] = []
     monkeypatch.setattr(
         main_module,
         "initialize_database",
         lambda: initialization_calls.append(True),
+    )
+    monkeypatch.setattr(
+        main_module.machine_service,
+        "shutdown",
+        lambda: shutdown_calls.append(True),
     )
     test_application = main_module.create_app()
 
@@ -45,3 +51,4 @@ def test_application_lifespan_initializes_database(monkeypatch) -> None:
     asyncio.run(run_lifespan())
 
     assert initialization_calls == [True]
+    assert shutdown_calls == [True]

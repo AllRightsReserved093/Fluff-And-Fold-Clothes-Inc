@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 import httpx
 
-from laundry_contracts.contracts import DryerChangeOfStateReport, DryerCyclePhase, DryerErrorReport, DryerPeriodicReport, ErrorResolutionReport, ErrorSource, MachineType, OperationState
+from laundry_contracts.contracts import DryerChangeOfStateReport, DryerCyclePhase, DryerErrorReport, DryerErrorResolutionReport, DryerPeriodicReport, ErrorSource, MachineType, OperationState
 from simulator.faults import DryerFault, FaultState, create_dryer_fault
 from simulator.machine import COMPLETE_DURATION_SECONDS, IDLE_DURATION_SECONDS, Machine
 
@@ -23,12 +23,13 @@ DRYER_PHASE_DURATIONS = {
 
 
 class Dryer(Machine):
+    active_fault: DryerFault | None
+
     def __init__(self, machine_id: str, http_client: httpx.Client, api_base_url: str) -> None:
         super().__init__(machine_id, MachineType.DRYER, http_client, api_base_url)
         self.air_temperature = 25.0
         self.air_flow_speed = 0.0
         self.moisture = 70.0
-        self.active_fault: DryerFault | None = None
 
     def tick(self, elapsed_seconds: float) -> None:
         if not self.is_registered:
@@ -149,10 +150,12 @@ class Dryer(Machine):
         return True
 
     def _report_active_fault(self) -> None:
+        # Check if a fault is active
         fault = self.active_fault
         if fault is None:
             return
 
+        # Generate report
         recorded_at = datetime.now(UTC)
         state_report = DryerChangeOfStateReport(
             machine_id=self.machine_id,
@@ -179,38 +182,33 @@ class Dryer(Machine):
             change_of_state=True,
             change_of_state_report=state_report,
         )
+
+        # Update state
         self.operation_state = OperationState.FAULTED
         self.phase_elapsed_seconds = 0.0
+
+        # Post the error report
         self.post("/reports/error", error_report, {200})
         print(f"[{self.machine_id}] Protective shutdown: {fault.error_code}")
 
-    def repair(self) -> bool:
-        if self.operation_state is not OperationState.FAULTED or self.active_fault is None:
-            print(f"[{self.machine_id}] No repairable fault is active")
-            return False
-        if self.active_fault.state is FaultState.REPAIRING:
-            print(f"[{self.machine_id}] Repair is already in progress")
-            return False
-        if not self.active_fault.start_repair():
-            print(f"[{self.machine_id}] No repairable fault is active")
-            return False
-
-        print(f"[{self.machine_id}] Repair started")
-        return True
-
     def _resolve_active_fault(self) -> None:
+        # Check if active fault exists
         fault = self.active_fault
         if fault is None:
             return
 
-        self.send_periodic_report()
-        report = ErrorResolutionReport(
+        # Generate report
+        report = DryerErrorResolutionReport(
             machine_id=self.machine_id,
             machine_type=MachineType.DRYER,
             report_id=self.new_report_id("resolution"),
             recorded_at=datetime.now(UTC),
             error_id=fault.error_id,
             resolution_message=fault.resolution_message,
+            operation_state=self.operation_state,
+            cycle_stage=self.cycle_stage,
+            general_sensor_readings={"vibration": self.vibration, "door_locked": self.door_locked},
+            special_sensor_readings={"air_temperature": self.air_temperature, "air_flow_speed": self.air_flow_speed, "moisture": self.moisture},
         )
         self.post("/reports/error-resolution", report, {200})
         self.active_fault = None

@@ -15,13 +15,13 @@ from app.machines.machines import Machine
 from app.services import machine_service as machine_service_module
 from app.services.machine_service import MachineService
 from laundry_contracts.contracts import (
-    ErrorResolutionReport,
     ErrorSource,
     MachineErrorCode,
     MachineType,
     OperationState,
     WasherChangeOfStateReport,
     WasherErrorReport,
+    WasherErrorResolutionReport,
     WasherPeriodicReport,
     WasherCyclePhase,
 )
@@ -209,23 +209,30 @@ def test_device_error_resolution_updates_database_and_memory(database_session_fa
     )
     assert service.handle_error_report(error_report)
 
-    resolution_report = ErrorResolutionReport(
+    resolution_report = WasherErrorResolutionReport(
         machine_id="washer-02",
         machine_type=MachineType.WASHER,
         report_id="resolution-02",
         recorded_at=recorded_at + timedelta(seconds=5),
         error_id="water-error-01",
         resolution_message="Water sensor recovered",
+        operation_state=OperationState.IDLE,
+        cycle_stage=None,
+        general_sensor_readings={"vibration": 0.1, "door_locked": False},
+        special_sensor_readings={"water_level": 0.0, "water_temperature": 20.0},
     )
     assert service.handle_error_resolution_report(resolution_report)
     assert "water-error-01" not in service.machines_registry["washer-02"].error_list
 
     with database_session_factory() as database_session:
         fault_event = database_session.scalar(select(FaultEventRecord).where(FaultEventRecord.error_id == "water-error-01"))
+        recovery_reading = database_session.scalar(select(SensorReadingRecord).where(SensorReadingRecord.report_id == "resolution-02"))
 
     assert fault_event is not None
     assert fault_event.resolved_at is not None
     assert fault_event.resolution_message == "Water sensor recovered"
+    assert recovery_reading is not None
+    assert recovery_reading.special_readings["water_temperature"] == 20.0
 
 
 def test_periodic_reports_create_deduplicate_and_resolve_sensor_fault(database_session_factory: sessionmaker[Session]) -> None:

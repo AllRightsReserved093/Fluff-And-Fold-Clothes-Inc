@@ -21,7 +21,15 @@ class FaultState(Enum):
     REPAIRED = auto()
 
 
-class DryerFault(Protocol):
+# Define the fault behavior required by shared machine repair logic.
+# 定义机器公共维修逻辑所需的故障行为。
+class MachineFault(Protocol):
+    state: FaultState
+
+    def start_repair(self) -> None: ...
+
+
+class DryerFault(MachineFault, Protocol):
     name: str
     error_id: str
     error_code: str
@@ -35,9 +43,6 @@ class DryerFault(Protocol):
     def can_inject(self, operation_state: OperationState, cycle_stage: DryerCyclePhase | None) -> bool: ...
 
     def tick(self, air_temperature: float, air_flow_speed: float, elapsed_seconds: float) -> tuple[float, float, FaultState | None]: ...
-
-    def start_repair(self) -> bool: ...
-
 
 class BlockedVentFault:
     name = "blocked-vent"
@@ -73,12 +78,8 @@ class BlockedVentFault:
 
         return air_temperature, air_flow_speed, None
 
-    def start_repair(self) -> bool:
-        if self.state is not FaultState.TRIPPED:
-            return False
-
+    def start_repair(self) -> None:
         self.state = FaultState.REPAIRING
-        return True
 
 
 DRYER_FAULT_FACTORIES: dict[str, Callable[[], DryerFault]] = {

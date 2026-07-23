@@ -29,6 +29,12 @@ class Washer(Machine):
         self.water_level = 0.0
         self.water_temperature = 20.0
 
+    # Keep a safe placeholder until washer fault simulation is implemented.
+    # 在洗衣机故障模拟实现前，保留一个安全的占位入口。
+    def inject_fault(self, fault_name: str) -> bool:
+        print(f"[{self.machine_id}] Fault {fault_name} is not supported")
+        return False
+
     def tick(self, elapsed_seconds: float) -> None:
         if not self.is_registered:
             return

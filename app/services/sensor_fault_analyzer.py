@@ -2,9 +2,12 @@
 # 使用明确的原型阈值检测周期报告中的传感器故障。
 
 from laundry_contracts.contracts import (
+    DryerErrorResolutionReport,
     DryerPeriodicReport,
+    ErrorResolutionReport,
     OperationState,
     PeriodicReport,
+    WasherErrorResolutionReport,
     WasherPeriodicReport,
 )
 
@@ -27,7 +30,7 @@ SENSOR_FAULT_ERROR_CODES = {
 
 # Return the active sensor fault codes and messages for one complete report.
 # 返回一份完整报告中当前存在的传感器故障代码与消息。
-def detect_sensor_faults(report: PeriodicReport) -> dict[str, str]:
+def detect_sensor_faults(report: PeriodicReport | ErrorResolutionReport) -> dict[str, str]:
     detected_faults: dict[str, str] = {}
 
     if report.general_sensor_readings.vibration > MAX_VIBRATION:
@@ -36,11 +39,11 @@ def detect_sensor_faults(report: PeriodicReport) -> dict[str, str]:
     if report.operation_state is OperationState.RUNNING and not report.general_sensor_readings.door_locked:
         detected_faults["door_unlocked_while_running"] = "Machine door is not locked while running"
 
-    if isinstance(report, WasherPeriodicReport):
+    if isinstance(report, (WasherPeriodicReport, WasherErrorResolutionReport)):
         if report.special_sensor_readings.water_temperature > MAX_WASHER_WATER_TEMPERATURE:
             detected_faults["washer_water_temperature_high"] = f"Water temperature exceeds {MAX_WASHER_WATER_TEMPERATURE} C"
 
-    if isinstance(report, DryerPeriodicReport):
+    if isinstance(report, (DryerPeriodicReport, DryerErrorResolutionReport)):
         if report.special_sensor_readings.air_temperature > MAX_DRYER_AIR_TEMPERATURE:
             detected_faults["dryer_air_temperature_high"] = f"Air temperature exceeds {MAX_DRYER_AIR_TEMPERATURE} C"
         if report.operation_state is OperationState.RUNNING and report.special_sensor_readings.air_flow_speed < MIN_DRYER_AIR_FLOW_SPEED:

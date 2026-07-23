@@ -13,13 +13,13 @@ from laundry_contracts.contracts import (
     DeregistrationRequest,
     DryerPeriodicReport,
     ErrorReport,
-    ErrorResolutionReport,
     ErrorSource,
     MachineError,
     PeriodicReport,
     RegistrationRequest,
     WasherChangeOfStateReport,
     WasherErrorReport,
+    WasherErrorResolutionReport,
     WasherPeriodicReport,
 )
 
@@ -175,26 +175,24 @@ def test_registration_and_deregistration_times_are_utc() -> None:
 
 
 def test_error_resolution_references_existing_error_only() -> None:
-    resolution = ErrorResolutionReport(
+    resolution = WasherErrorResolutionReport(
         machine_id="washer-01",
         machine_type="washer",
         report_id="report-03",
         recorded_at=datetime.now(UTC),
         error_id="error-01",
         resolution_message="Door latch was reset",
+        operation_state="idle",
+        cycle_stage=None,
+        general_sensor_readings={"vibration": 0.1, "door_locked": False},
+        special_sensor_readings={"water_level": 0.0, "water_temperature": 20.0},
     )
 
     assert resolution.error_id == "error-01"
+    assert resolution.special_sensor_readings.water_temperature == 20.0
 
     with pytest.raises(ValidationError):
-        ErrorResolutionReport(
-            machine_id="washer-01",
-            machine_type="washer",
-            report_id="report-03",
-            recorded_at=datetime.now(UTC),
-            error_id="error-01",
-            error_code="door_fault",
-        )
+        WasherErrorResolutionReport(**resolution.model_dump(), error_code="door_fault")
 
 
 def test_error_report_rejects_cross_machine_sensor_payload() -> None:

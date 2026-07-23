@@ -200,11 +200,30 @@ ErrorReport: TypeAlias = Annotated[
 ]
 
 
-# Resolve an existing error by ID without duplicating the original payload.
-# 通过 ID 解除已有错误，不重复原始错误载荷。
-class ErrorResolutionReport(BaseMachineReport):
+# Resolve an existing error
+class BaseErrorResolutionReport(BaseMachineReport):
     error_id: Identifier
     resolution_message: MessageText | None = None
+    operation_state: OperationState
+    general_sensor_readings: GeneralSensorReadings
+
+
+class WasherErrorResolutionReport(BaseErrorResolutionReport):
+    machine_type: Literal[MachineType.WASHER]
+    cycle_stage: WasherCyclePhase | None
+    special_sensor_readings: WasherSensorReadings
+
+
+class DryerErrorResolutionReport(BaseErrorResolutionReport):
+    machine_type: Literal[MachineType.DRYER]
+    cycle_stage: DryerCyclePhase | None
+    special_sensor_readings: DryerSensorReadings
+
+
+ErrorResolutionReport: TypeAlias = Annotated[
+    WasherErrorResolutionReport | DryerErrorResolutionReport,
+    Field(discriminator="machine_type"),
+]
 
 # --------- Registration ----------
 

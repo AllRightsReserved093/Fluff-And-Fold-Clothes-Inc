@@ -1,9 +1,17 @@
 # Verify the in-memory machine service and monitor coordination.
 # 验证内存机器服务及其与监控器的协调行为。
 
+from collections.abc import Generator
 from datetime import UTC, datetime
 
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.database.base import Base
 from app.machines.machines import Machine
+from app.services import machine_service as machine_service_module
 from app.services.machine_service import MachineService
 from laundry_contracts.contracts import (
     ErrorSource,
@@ -44,6 +52,25 @@ class StubMachineMonitor:
         self.is_working = False
 
 
+# Isolate every service test in a fresh shared in-memory SQLite database.
+# 使每个服务测试都使用独立的共享内存 SQLite 数据库。
+@pytest.fixture(autouse=True)
+def isolated_database(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+    test_engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=test_engine)
+    test_session_factory = sessionmaker(bind=test_engine, autoflush=False, expire_on_commit=False)
+    monkeypatch.setattr(machine_service_module, "SessionFactory", test_session_factory)
+
+    yield
+
+    Base.metadata.drop_all(bind=test_engine)
+    test_engine.dispose()
+
+
 def test_register_machine_rejects_empty_and_duplicate_ids() -> None:
     monitor = StubMachineMonitor()
     service = MachineService(monitor)
@@ -68,6 +95,15 @@ def test_register_machine_starts_monitor() -> None:
     service.machine_register("washer-01", MachineType.WASHER)
 
     assert monitor.start_count == 1
+
+
+def test_shutdown_stops_monitor() -> None:
+    monitor = StubMachineMonitor()
+    service = MachineService(monitor)
+
+    service.shutdown()
+
+    assert monitor.stop_count == 1
 
 
 def test_deregister_machine_removes_machine_from_monitor() -> None:
@@ -137,7 +173,18 @@ def test_change_report_and_heartbeat_timeout_update_machine() -> None:
     assert heartbeat_error.error_code == MachineErrorCode.HEARTBEAT_TIMEOUT
     assert heartbeat_error.error_source is ErrorSource.HEARTBEAT_MONITOR
 
-    assert service.handle_change_of_state_report(report)
+    recovery_report = WasherChangeOfStateReport(
+        machine_id="washer-01",
+        machine_type=MachineType.WASHER,
+        report_id="report-03",
+        recorded_at=datetime.now(UTC),
+        previous_operation_state=OperationState.RUNNING,
+        new_operation_state=OperationState.RUNNING,
+        previous_cycle_stage=WasherCyclePhase.FILLING,
+        new_cycle_stage=WasherCyclePhase.WASHING,
+    )
+
+    assert service.handle_change_of_state_report(recovery_report)
     assert machine.is_online
     assert not machine.is_error
     assert not machine.error_list

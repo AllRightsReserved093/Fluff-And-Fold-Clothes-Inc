@@ -67,6 +67,15 @@ def test_washer_advances_workflow_and_reports_every_fifteen_seconds() -> None:
     client.close()
 
 
+def test_washer_fault_commands_use_safe_placeholders() -> None:
+    client, _ = create_recording_client()
+    washer = Washer("washer-01", client, "http://test/api/v1")
+
+    assert not washer.inject_fault("blocked-vent")
+    assert not washer.repair()
+    client.close()
+
+
 def test_blocked_vent_progresses_to_device_shutdown_and_repair() -> None:
     client, requests = create_recording_client()
     dryer = Dryer("dryer-01", client, "http://test/api/v1")
@@ -91,9 +100,12 @@ def test_blocked_vent_progresses_to_device_shutdown_and_repair() -> None:
     assert dryer.active_fault is None
 
     request_paths = [path for path, _ in requests]
-    assert "/api/v1/reports/periodic" in request_paths
     assert "/api/v1/reports/error-resolution" in request_paths
     assert request_paths[-1] == "/api/v1/reports/change-of-state"
+
+    resolution_payload = next(payload for path, payload in requests if path == "/api/v1/reports/error-resolution")
+    assert resolution_payload["special_sensor_readings"]["air_temperature"] == 70.0
+    assert resolution_payload["special_sensor_readings"]["air_flow_speed"] == 2.0
     client.close()
 
 

@@ -1,7 +1,7 @@
 # Create and expose the FastAPI application.
 # 创建并导出 FastAPI 应用。
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,14 +9,18 @@ from fastapi import FastAPI
 from app.api.router import api_router
 from app.core.config import get_settings
 from app.database.session import initialize_database
+from app.services.machine_service import machine_service
 
 
 # Initialize persistent storage when the application starts.
 # 在应用启动时初始化持久化存储。
 @asynccontextmanager
-async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
+async def lifespan(_application: FastAPI) -> AsyncGenerator[None, None]:
     initialize_database()
-    yield
+    try:
+        yield
+    finally:
+        machine_service.shutdown()
 
 
 # Build the application and register its routes.

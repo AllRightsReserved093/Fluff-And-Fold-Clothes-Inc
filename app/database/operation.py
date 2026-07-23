@@ -17,6 +17,7 @@ from app.machines.machines import Machine
 from laundry_contracts.contracts import (
     ChangeOfStateReport,
     ErrorReport,
+    ErrorResolutionReport,
     ErrorSource,
     FaultEventResponse,
     MachineError,
@@ -340,7 +341,41 @@ class DatabaseOperation:
         fault_event.is_acknowledged = True
         return True
 
+    # Store recovery readings and resolve the matching device fault.
+    # 保存恢复后的读数，并解除对应的设备故障。
+    def add_error_resolution_report(self, database_session: Session, report: ErrorResolutionReport) -> bool:
+        machine_record = database_session.get(MachineRecord, report.machine_id)
+        if machine_record is None or not machine_record.is_registered:
+            return False
+
+        existing_reading = database_session.scalar(
+            select(SensorReadingRecord).where(
+                SensorReadingRecord.machine_id == report.machine_id,
+                SensorReadingRecord.report_id == report.report_id,
+            )
+        )
+        if existing_reading is not None:
+            return False
+
+        if not self.resolve_fault_event(database_session, report.machine_id, report.error_id, report.recorded_at, report.resolution_message):
+            return False
+
+        cycle_stage = report.cycle_stage.value if report.cycle_stage is not None else None
+        database_session.add(
+            SensorReadingRecord(
+                machine_id=report.machine_id,
+                report_id=report.report_id,
+                recorded_at=report.recorded_at,
+                operation_state=report.operation_state,
+                cycle_stage=cycle_stage,
+                general_readings=report.general_sensor_readings.model_dump(mode="json"),
+                special_readings=report.special_sensor_readings.model_dump(mode="json"),
+            )
+        )
+        return True
+
     # Resolve one persisted fault without deleting its history.
+    # 解除一条已保存的故障，但保留其历史记录。
     def resolve_fault_event(self, database_session: Session, machine_id: str, error_id: str, resolved_at: datetime, resolution_message: str | None) -> bool:
         fault_event = database_session.scalar(
             select(FaultEventRecord).where(
@@ -403,7 +438,7 @@ class DatabaseOperation:
 
     # Create, retain, or automatically resolve detected sensor faults.
     # 新增、保留或自动解除检测到的传感器故障。
-    def reconcile_sensor_faults(self, database_session: Session, report: PeriodicReport, detected_sensor_faults: dict[str, str], managed_error_codes: set[str]) -> tuple[list[MachineError], list[str]]:
+    def reconcile_sensor_faults(self, database_session: Session, report: PeriodicReport | ErrorResolutionReport, detected_sensor_faults: dict[str, str], managed_error_codes: set[str]) -> tuple[list[MachineError], list[str]]:
         active_fault_events = database_session.scalars(
             select(FaultEventRecord).where(
                 FaultEventRecord.machine_id == report.machine_id,
