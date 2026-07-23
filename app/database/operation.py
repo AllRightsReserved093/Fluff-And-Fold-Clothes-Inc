@@ -1,13 +1,14 @@
-# Persist machine registration, reports, faults, and heartbeat events.
-# 持久化机器注册、报告、故障与心跳事件。
+# Persist machine registration, reports, faults, data events, and heartbeat events.
+# 持久化机器注册、报告、故障、数据事件与心跳事件。
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database.models import (
+    DataEventRecord,
     FaultEventRecord,
     MachineRecord,
     MachineStateEventRecord,
@@ -16,17 +17,22 @@ from app.database.models import (
 from app.machines.machines import Machine
 from laundry_contracts.contracts import (
     ChangeOfStateReport,
+    DataEventResponse,
     ErrorReport,
     ErrorResolutionReport,
     ErrorSource,
+    FaultContextResponse,
     FaultEventResponse,
     MachineError,
+    MachineStateEventResponse,
     MachineStatusResponse,
     OperationState,
     PeriodicReport,
+    ReportProcessingResult,
     SensorReadingResponse,
     StateEventSource,
 )
+from laundry_contracts.fault_codes import DiagnosticCode
 
 
 class DatabaseOperation:
@@ -82,10 +88,10 @@ class DatabaseOperation:
         return True
 
     # Store a periodic reading and reconcile the current machine snapshot.
-    def add_periodic_report(self, database_session: Session, report: PeriodicReport) -> bool:
+    def add_periodic_report(self, database_session: Session, report: PeriodicReport) -> ReportProcessingResult:
         machine_record = database_session.get(MachineRecord, report.machine_id)
         if machine_record is None or not machine_record.is_registered:
-            return False
+            return ReportProcessingResult.NOT_FOUND
 
         # Check if a reading with this report ID already exists
         existing_reading = database_session.scalar(
@@ -96,7 +102,7 @@ class DatabaseOperation:
         )
         if existing_reading is not None:
             # A reading with this report ID already exists
-            return False
+            return ReportProcessingResult.DUPLICATE
 
         # Assign cycle stage
         cycle_stage = report.cycle_stage.value if report.cycle_stage is not None else None
@@ -127,17 +133,20 @@ class DatabaseOperation:
                     reason="Inferred from a periodic report",
                 )
             )
-            # Record the fault
+            # Record the missing state report as an immutable data event.
             database_session.add(
-                FaultEventRecord(
-                    error_id=f"state-report-gap-{uuid4()}",
+                DataEventRecord(
                     machine_id=report.machine_id,
                     report_id=report.report_id,
-                    error_code="state_change_report_missing",
-                    error_message="Periodic report state differs from the stored state",
-                    error_source=ErrorSource.ANALYTICS,
-                    is_acknowledged=False,
-                    raised_at=report.recorded_at,
+                    event_code=DiagnosticCode.STATE_REPORT_GAP_DETECTED.value,
+                    event_message="Periodic report state differs from the stored state",
+                    event_details={
+                        "stored_operation_state": machine_record.operation_state.value,
+                        "reported_operation_state": report.operation_state.value,
+                        "stored_cycle_stage": machine_record.cycle_stage,
+                        "reported_cycle_stage": cycle_stage,
+                    },
+                    recorded_at=report.recorded_at,
                 )
             )
 
@@ -159,13 +168,13 @@ class DatabaseOperation:
         machine_record.cycle_stage = cycle_stage
         machine_record.last_online = datetime.now(UTC)
         machine_record.recorded_at = report.recorded_at
-        return True
+        return ReportProcessingResult.ACCEPTED
 
     # Store a state-change report and update the current snapshot.
-    def add_state_change_report(self, database_session: Session, report: ChangeOfStateReport) -> bool:
+    def add_state_change_report(self, database_session: Session, report: ChangeOfStateReport) -> ReportProcessingResult:
         machine_record = database_session.get(MachineRecord, report.machine_id)
         if machine_record is None or not machine_record.is_registered:
-            return False
+            return ReportProcessingResult.NOT_FOUND
 
         # Check if a state change report already exists
         existing_event = database_session.scalar(
@@ -175,7 +184,7 @@ class DatabaseOperation:
             )
         )
         if existing_event is not None:
-            return False
+            return ReportProcessingResult.DUPLICATE
 
         # Get the previous cycle stage and new cycle stage
         previous_cycle_stage = report.previous_cycle_stage.value if report.previous_cycle_stage is not None else None
@@ -190,19 +199,20 @@ class DatabaseOperation:
                 previous_state_mismatch = True
 
         if previous_state_mismatch:
-            # Record the previous state mismatch
-            # The system failed to record the previous state
-            # Add a fault event
+            # Record the previous state mismatch as an immutable data event.
             database_session.add(
-                FaultEventRecord(
-                    error_id=f"state-history-mismatch-{uuid4()}",
+                DataEventRecord(
                     machine_id=report.machine_id,
                     report_id=report.report_id,
-                    error_code="state_history_mismatch",
-                    error_message="Reported previous state differs from the stored state",
-                    error_source=ErrorSource.ANALYTICS,
-                    is_acknowledged=False,
-                    raised_at=report.recorded_at,
+                    event_code=DiagnosticCode.STATE_SEQUENCE_MISMATCH.value,
+                    event_message="Reported previous state differs from the stored state",
+                    event_details={
+                        "expected_previous_operation_state": machine_record.operation_state.value,
+                        "reported_previous_operation_state": report.previous_operation_state.value,
+                        "expected_previous_cycle_stage": machine_record.cycle_stage,
+                        "reported_previous_cycle_stage": previous_cycle_stage,
+                    },
+                    recorded_at=report.recorded_at,
                 )
             )
 
@@ -226,13 +236,13 @@ class DatabaseOperation:
         machine_record.cycle_stage = new_cycle_stage
         machine_record.last_online = datetime.now(UTC)
         machine_record.recorded_at = report.recorded_at
-        return True
+        return ReportProcessingResult.ACCEPTED
 
     # Store an error report.
-    def add_error_report(self, database_session: Session, report: ErrorReport) -> bool:
+    def add_error_report(self, database_session: Session, report: ErrorReport) -> ReportProcessingResult:
         machine_record = database_session.get(MachineRecord, report.machine_id)
         if machine_record is None or not machine_record.is_registered:
-            return False
+            return ReportProcessingResult.NOT_FOUND
 
         existing_fault = database_session.scalar(
             select(FaultEventRecord).where(
@@ -247,21 +257,21 @@ class DatabaseOperation:
             )
         )
         if existing_fault is not None or existing_reading is not None:
-            return False
+            return ReportProcessingResult.DUPLICATE
 
         state_report = report.change_of_state_report
         if report.change_of_state:
             if state_report is None:
-                return False
+                return ReportProcessingResult.NOT_FOUND
         else:
             if state_report is not None:
-                return False
+                return ReportProcessingResult.NOT_FOUND
 
         if state_report is not None:
             if state_report.machine_id != report.machine_id:
-                return False
+                return ReportProcessingResult.NOT_FOUND
             if state_report.machine_type != report.machine_type:
-                return False
+                return ReportProcessingResult.NOT_FOUND
 
         operation_state = None
         cycle_stage = None
@@ -323,7 +333,7 @@ class DatabaseOperation:
             machine_record.recorded_at = report.recorded_at
 
         machine_record.last_online = datetime.now(UTC)
-        return True
+        return ReportProcessingResult.ACCEPTED
 
     # Acknowledge one persisted fault without resolving it.
     def acknowledge_fault_event(self, database_session: Session, machine_id: str, error_id: str) -> bool:
@@ -343,10 +353,10 @@ class DatabaseOperation:
 
     # Store recovery readings and resolve the matching device fault.
     # 保存恢复后的读数，并解除对应的设备故障。
-    def add_error_resolution_report(self, database_session: Session, report: ErrorResolutionReport) -> bool:
+    def add_error_resolution_report(self, database_session: Session, report: ErrorResolutionReport) -> ReportProcessingResult:
         machine_record = database_session.get(MachineRecord, report.machine_id)
         if machine_record is None or not machine_record.is_registered:
-            return False
+            return ReportProcessingResult.NOT_FOUND
 
         existing_reading = database_session.scalar(
             select(SensorReadingRecord).where(
@@ -355,10 +365,10 @@ class DatabaseOperation:
             )
         )
         if existing_reading is not None:
-            return False
+            return ReportProcessingResult.DUPLICATE
 
         if not self.resolve_fault_event(database_session, report.machine_id, report.error_id, report.recorded_at, report.resolution_message):
-            return False
+            return ReportProcessingResult.NOT_FOUND
 
         cycle_stage = report.cycle_stage.value if report.cycle_stage is not None else None
         database_session.add(
@@ -372,7 +382,7 @@ class DatabaseOperation:
                 special_readings=report.special_sensor_readings.model_dump(mode="json"),
             )
         )
-        return True
+        return ReportProcessingResult.ACCEPTED
 
     # Resolve one persisted fault without deleting its history.
     # 解除一条已保存的故障，但保留其历史记录。
@@ -567,6 +577,160 @@ class DatabaseOperation:
             )
 
         return reading_results
+
+    # Query immutable data events across all machines or one selected machine.
+    # 查询所有机器或指定机器的不可变数据事件。
+    def list_data_events(self, database_session: Session, machine_id: str | None, event_code: str | None, limit: int) -> list[DataEventResponse] | None:
+        if machine_id is not None and database_session.get(MachineRecord, machine_id) is None:
+            return None
+
+        statement = select(DataEventRecord)
+        if machine_id is not None:
+            statement = statement.where(DataEventRecord.machine_id == machine_id)
+        if event_code is not None:
+            statement = statement.where(DataEventRecord.event_code == event_code)
+
+        statement = statement.order_by(DataEventRecord.recorded_at.desc()).limit(limit)
+        data_event_records = database_session.scalars(statement).all()
+        data_event_results = []
+
+        for data_event_record in data_event_records:
+            data_event_results.append(
+                DataEventResponse(
+                    data_event_id=data_event_record.data_event_id,
+                    machine_id=data_event_record.machine_id,
+                    report_id=data_event_record.report_id,
+                    event_code=data_event_record.event_code,
+                    event_message=data_event_record.event_message,
+                    event_details=data_event_record.event_details,
+                    recorded_at=data_event_record.recorded_at,
+                    received_at=data_event_record.received_at,
+                )
+            )
+
+        return data_event_results
+
+    # Query one fault and the persisted machine history immediately preceding it.
+    # 查询一条故障及其发生前已保存的机器历史。
+    def get_fault_context(self, database_session: Session, fault_event_id: int, minutes: int) -> FaultContextResponse | None:
+        fault_record = database_session.get(FaultEventRecord, fault_event_id)
+        if fault_record is None:
+            return None
+
+        window_end = fault_record.raised_at
+        window_start = window_end - timedelta(minutes=minutes)
+
+        reading_records = database_session.scalars(
+            select(SensorReadingRecord)
+            .where(
+                SensorReadingRecord.machine_id == fault_record.machine_id,
+                SensorReadingRecord.recorded_at >= window_start,
+                SensorReadingRecord.recorded_at <= window_end,
+            )
+            .order_by(SensorReadingRecord.recorded_at)
+        ).all()
+        state_event_records = database_session.scalars(
+            select(MachineStateEventRecord)
+            .where(
+                MachineStateEventRecord.machine_id == fault_record.machine_id,
+                MachineStateEventRecord.recorded_at >= window_start,
+                MachineStateEventRecord.recorded_at <= window_end,
+            )
+            .order_by(MachineStateEventRecord.recorded_at)
+        ).all()
+        data_event_records = database_session.scalars(
+            select(DataEventRecord)
+            .where(
+                DataEventRecord.machine_id == fault_record.machine_id,
+                DataEventRecord.recorded_at >= window_start,
+                DataEventRecord.recorded_at <= window_end,
+            )
+            .order_by(DataEventRecord.recorded_at)
+        ).all()
+
+        sensor_readings = []
+        for reading_record in reading_records:
+            sensor_readings.append(
+                SensorReadingResponse(
+                    reading_id=reading_record.reading_id,
+                    machine_id=reading_record.machine_id,
+                    report_id=reading_record.report_id,
+                    recorded_at=reading_record.recorded_at,
+                    received_at=reading_record.received_at,
+                    operation_state=reading_record.operation_state,
+                    cycle_stage=reading_record.cycle_stage,
+                    general_readings=reading_record.general_readings,
+                    special_readings=reading_record.special_readings,
+                )
+            )
+
+        state_events = []
+        for state_event_record in state_event_records:
+            state_events.append(
+                MachineStateEventResponse(
+                    state_event_id=state_event_record.state_event_id,
+                    machine_id=state_event_record.machine_id,
+                    report_id=state_event_record.report_id,
+                    event_source=state_event_record.event_source,
+                    recorded_at=state_event_record.recorded_at,
+                    received_at=state_event_record.received_at,
+                    previous_operation_state=state_event_record.previous_operation_state,
+                    new_operation_state=state_event_record.new_operation_state,
+                    previous_cycle_stage=state_event_record.previous_cycle_stage,
+                    new_cycle_stage=state_event_record.new_cycle_stage,
+                    reason=state_event_record.reason,
+                )
+            )
+
+        data_events = []
+        for data_event_record in data_event_records:
+            data_events.append(
+                DataEventResponse(
+                    data_event_id=data_event_record.data_event_id,
+                    machine_id=data_event_record.machine_id,
+                    report_id=data_event_record.report_id,
+                    event_code=data_event_record.event_code,
+                    event_message=data_event_record.event_message,
+                    event_details=data_event_record.event_details,
+                    recorded_at=data_event_record.recorded_at,
+                    received_at=data_event_record.received_at,
+                )
+            )
+
+        fault = FaultEventResponse(
+            fault_event_id=fault_record.fault_event_id,
+            machine_id=fault_record.machine_id,
+            report_id=fault_record.report_id,
+            error_id=fault_record.error_id,
+            error_code=fault_record.error_code,
+            error_message=fault_record.error_message,
+            error_source=fault_record.error_source,
+            is_acknowledged=fault_record.is_acknowledged,
+            raised_at=fault_record.raised_at,
+            resolved_at=fault_record.resolved_at,
+            resolution_message=fault_record.resolution_message,
+        )
+        return FaultContextResponse(
+            fault=fault,
+            window_start=window_start,
+            window_end=window_end,
+            sensor_readings=sensor_readings,
+            state_events=state_events,
+            data_events=data_events,
+        )
+
+    # Query fault context by the machine and device error IDs used by an error report.
+    # 使用错误报告中的机器编号和设备错误编号查询故障上下文。
+    def get_fault_context_by_error_id(self, database_session: Session, machine_id: str, error_id: str, minutes: int) -> FaultContextResponse | None:
+        fault_event_id = database_session.scalar(
+            select(FaultEventRecord.fault_event_id).where(
+                FaultEventRecord.machine_id == machine_id,
+                FaultEventRecord.error_id == error_id,
+            )
+        )
+        if fault_event_id is None:
+            return None
+        return self.get_fault_context(database_session, fault_event_id, minutes)
 
     # Query fault events across all machines or one selected machine.
     # 查询所有机器或指定机器的故障事件。

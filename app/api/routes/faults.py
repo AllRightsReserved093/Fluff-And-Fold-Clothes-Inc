@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Path, Query, status
 from app.services.machine_service import machine_service
 from laundry_contracts.contracts import (
     FaultAcknowledgementResponse,
+    FaultContextResponse,
     FaultEventResponse,
     FaultResolutionRequest,
     FaultResolutionResponse,
@@ -25,6 +26,17 @@ def list_faults(
 ) -> list[FaultEventResponse]:
     faults = machine_service.list_faults(None, active, acknowledged, limit)
     return faults if faults is not None else []
+
+
+@router.get("/faults/{fault_event_id}/context", response_model=FaultContextResponse)
+def get_fault_context(
+    fault_event_id: Annotated[int, Path(ge=1)],
+    minutes: Annotated[int, Query(ge=1, le=60)] = 5,
+) -> FaultContextResponse:
+    fault_context = machine_service.get_fault_context(fault_event_id, minutes)
+    if fault_context is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Fault not found")
+    return fault_context
 
 
 @router.get("/machines/{machine_id}/faults", response_model=list[FaultEventResponse])

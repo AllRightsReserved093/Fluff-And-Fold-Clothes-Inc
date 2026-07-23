@@ -22,6 +22,7 @@ from laundry_contracts.contracts import (
     WasherErrorResolutionReport,
     WasherPeriodicReport,
 )
+from laundry_contracts.fault_codes import DiagnosticCode
 
 
 periodic_report_adapter = TypeAdapter(PeriodicReport)
@@ -220,7 +221,7 @@ def test_error_report_rejects_cross_machine_sensor_payload() -> None:
 def test_machine_error_tracks_active_and_resolved_lifecycle() -> None:
     active_error = MachineError(
         error_id="heartbeat-timeout-washer-01",
-        error_code="heartbeat_timeout",
+        error_code=DiagnosticCode.DEVICE_COMMUNICATION_LOST.value,
         error_message="No report received before the deadline",
         error_source=ErrorSource.HEARTBEAT_MONITOR,
         raised_at="2026-07-20T12:00:00-07:00",

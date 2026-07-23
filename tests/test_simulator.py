@@ -8,6 +8,7 @@ from threading import Event
 import httpx
 
 from laundry_contracts.contracts import DryerCyclePhase, OperationState, WasherCyclePhase
+from laundry_contracts.fault_codes import DiagnosticCode
 from simulator.dryer import Dryer
 from simulator.faults import apply_blocked_vent
 from simulator.main import Command, create_machines, run_simulation
@@ -90,7 +91,7 @@ def test_blocked_vent_progresses_to_device_shutdown_and_repair() -> None:
     assert dryer.active_fault is not None
 
     error_payload = next(payload for path, payload in requests if path == "/api/v1/reports/error")
-    assert error_payload["error_code"] == "blocked_vent_overheat"
+    assert error_payload["error_code"] == DiagnosticCode.DRYER_OVERTEMPERATURE_TRIP.value
     assert error_payload["change_of_state"] is True
     assert error_payload["change_of_state_report"]["new_operation_state"] == "faulted"
 

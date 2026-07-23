@@ -5,14 +5,18 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from laundry_contracts.contracts import (
+    DryerSensorReadings,
     DryerCyclePhase,
     ErrorSource,
+    GeneralSensorReadings,
+    LatestSensorReading,
     MachineError,
-    MachineErrorCode,
     MachineType,
     OperationState,
+    WasherSensorReadings,
     WasherCyclePhase,
 )
+from laundry_contracts.fault_codes import DiagnosticCode
 
 class Machine:
 
@@ -28,7 +32,8 @@ class Machine:
     
     is_registered: bool
     last_online: datetime | None
-    last_updated: datetime | None
+    recorded_at: datetime | None
+    latest_reading: LatestSensorReading | None
 
     def __init__(self, machine_id: str, machine_type: MachineType):
         self.machine_id = machine_id
@@ -44,7 +49,8 @@ class Machine:
         self.is_registered = False
 
         self.last_online = None
-        self.last_updated = None
+        self.recorded_at = None
+        self.latest_reading = None
 
 
 
@@ -75,7 +81,7 @@ class Machine:
 
         for error_id, error in list(self.error_list.items()):
             if (
-                error.error_code != MachineErrorCode.HEARTBEAT_TIMEOUT
+                error.error_code != DiagnosticCode.DEVICE_COMMUNICATION_LOST.value
                 or not error.is_active
             ):
                 continue
@@ -98,9 +104,22 @@ class Machine:
     
 
     def update_state(self, operation_state: OperationState | None, cycle_stage: WasherCyclePhase | DryerCyclePhase | None):
-        self.last_updated = datetime.now(UTC)
         self.operation_state = operation_state
         self.cycle_stage = cycle_stage
+
+    # Store the newest accepted sensor values without querying their persisted history.
+    # 保存最新接受的传感器读数，避免查询其持久化历史。
+    def update_latest_reading(
+        self,
+        recorded_at: datetime,
+        general_readings: GeneralSensorReadings,
+        special_readings: WasherSensorReadings | DryerSensorReadings,
+    ) -> None:
+        self.latest_reading = LatestSensorReading(
+            recorded_at=recorded_at,
+            general_readings=general_readings,
+            special_readings=special_readings,
+        )
 
     def set_error_heartbeat_timeout(self):
         # Set an error due to heartbeat timeout
@@ -109,7 +128,7 @@ class Machine:
         self.add_error(
             MachineError(
                 error_id=f"heartbeat-timeout-{uuid4()}",
-                error_code=MachineErrorCode.HEARTBEAT_TIMEOUT,
+                error_code=DiagnosticCode.DEVICE_COMMUNICATION_LOST.value,
                 error_message="No device report received before the heartbeat deadline",
                 error_source=ErrorSource.HEARTBEAT_MONITOR,
                 raised_at=raised_at,
@@ -141,6 +160,4 @@ class Machine:
 
         if not self.error_list:
             self.is_error = False
-
-
 

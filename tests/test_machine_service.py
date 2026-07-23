@@ -15,14 +15,15 @@ from app.services import machine_service as machine_service_module
 from app.services.machine_service import MachineService
 from laundry_contracts.contracts import (
     ErrorSource,
-    MachineErrorCode,
     MachineType,
     OperationState,
+    ReportProcessingResult,
     WasherChangeOfStateReport,
     WasherErrorReport,
     WasherPeriodicReport,
     WasherCyclePhase,
 )
+from laundry_contracts.fault_codes import DiagnosticCode
 
 
 class StubMachineMonitor:
@@ -140,10 +141,15 @@ def test_periodic_report_updates_machine_and_heartbeat() -> None:
         },
     )
 
-    assert service.handle_periodic_report(report)
+    assert service.handle_periodic_report(report) is ReportProcessingResult.ACCEPTED
     assert machine.operation_state is OperationState.RUNNING
     assert machine.cycle_stage is WasherCyclePhase.WASHING
     assert machine.is_online
+    assert machine.recorded_at == report.recorded_at
+    assert machine.latest_reading is not None
+    assert machine.latest_reading.recorded_at == report.recorded_at
+    assert machine.latest_reading.general_readings.vibration == 0.1
+    assert machine.latest_reading.special_readings.water_temperature == 40.0
     assert monitor.updated_machine_ids == ["washer-01"]
 
 
@@ -163,14 +169,14 @@ def test_change_report_and_heartbeat_timeout_update_machine() -> None:
         new_cycle_stage=WasherCyclePhase.FILLING,
     )
 
-    assert service.handle_change_of_state_report(report)
+    assert service.handle_change_of_state_report(report) is ReportProcessingResult.ACCEPTED
     assert machine.operation_state is OperationState.RUNNING
     assert machine.cycle_stage is WasherCyclePhase.FILLING
     assert service.handle_heartbeat_timeout("washer-01")
     assert not machine.is_online
     assert machine.is_error
     heartbeat_error = next(iter(machine.error_list.values()))
-    assert heartbeat_error.error_code == MachineErrorCode.HEARTBEAT_TIMEOUT
+    assert heartbeat_error.error_code == DiagnosticCode.DEVICE_COMMUNICATION_LOST.value
     assert heartbeat_error.error_source is ErrorSource.HEARTBEAT_MONITOR
 
     recovery_report = WasherChangeOfStateReport(
@@ -184,8 +190,9 @@ def test_change_report_and_heartbeat_timeout_update_machine() -> None:
         new_cycle_stage=WasherCyclePhase.WASHING,
     )
 
-    assert service.handle_change_of_state_report(recovery_report)
+    assert service.handle_change_of_state_report(recovery_report) is ReportProcessingResult.ACCEPTED
     assert machine.is_online
+    assert machine.recorded_at == recovery_report.recorded_at
     assert not machine.is_error
     assert not machine.error_list
 
@@ -215,8 +222,11 @@ def test_error_report_adds_machine_error() -> None:
         },
     )
 
-    assert service.handle_error_report(report)
+    assert service.handle_error_report(report) is ReportProcessingResult.ACCEPTED
     assert machine.is_online
+    assert machine.recorded_at == report.recorded_at
+    assert machine.latest_reading is not None
+    assert machine.latest_reading.general_readings.door_locked is False
     assert machine.error_list["door-error-01"].raised_at == report.recorded_at
     assert monitor.updated_machine_ids == ["washer-01"]
 

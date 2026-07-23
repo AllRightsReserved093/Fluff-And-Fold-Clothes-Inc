@@ -14,7 +14,6 @@ from pydantic import (
     model_validator,
 )
 
-
 # --------- Shared Validation Types ----------
 
 Identifier: TypeAlias = Annotated[str, Field(min_length=1, max_length=128)]
@@ -88,8 +87,12 @@ class StateEventSource(str, enum.Enum):
     ANALYTICS = "analytics"
 
 
-class MachineErrorCode(str, enum.Enum):
-    HEARTBEAT_TIMEOUT = "heartbeat_timeout"
+# Describe the outcome of processing one device report.
+# 描述一份设备报告的处理结果。
+class ReportProcessingResult(enum.Enum):
+    ACCEPTED = enum.auto()
+    DUPLICATE = enum.auto()
+    NOT_FOUND = enum.auto()
 
 # --------- Sensor Readings ----------
 
@@ -300,6 +303,19 @@ class FaultResolutionResponse(ContractModel):
     is_resolved: Literal[True]
 
 
+# Describe the most recent sensor values held in memory for one machine.
+# 描述一台机器当前保存在内存中的最新传感器读数。
+class LatestSensorReading(ContractModel):
+    recorded_at: AwareDatetime
+    general_readings: GeneralSensorReadings
+    special_readings: WasherSensorReadings | DryerSensorReadings
+
+    @field_validator("recorded_at")
+    @classmethod
+    def normalize_recorded_at(cls, recorded_at: datetime) -> datetime:
+        return normalize_to_utc(recorded_at)
+
+
 class MachineStatusResponse(ContractModel):
     machine_id: Identifier
     machine_type: MachineType
@@ -310,6 +326,7 @@ class MachineStatusResponse(ContractModel):
     registered_at: datetime | None
     last_online: datetime | None
     recorded_at: datetime | None
+    latest_reading: LatestSensorReading | None = None
 
 
 class SensorReadingResponse(ContractModel):
@@ -324,6 +341,31 @@ class SensorReadingResponse(ContractModel):
     special_readings: dict[str, Any]
 
 
+class DataEventResponse(ContractModel):
+    data_event_id: int
+    machine_id: Identifier
+    report_id: Identifier
+    event_code: ErrorCode
+    event_message: MessageText
+    event_details: dict[str, Any]
+    recorded_at: datetime
+    received_at: datetime
+
+
+class MachineStateEventResponse(ContractModel):
+    state_event_id: int
+    machine_id: Identifier
+    report_id: Identifier
+    event_source: StateEventSource
+    recorded_at: datetime
+    received_at: datetime
+    previous_operation_state: OperationState
+    new_operation_state: OperationState
+    previous_cycle_stage: str | None
+    new_cycle_stage: str | None
+    reason: MessageText | None
+
+
 class FaultEventResponse(ContractModel):
     fault_event_id: int
     machine_id: Identifier
@@ -336,6 +378,17 @@ class FaultEventResponse(ContractModel):
     raised_at: datetime
     resolved_at: datetime | None
     resolution_message: MessageText | None
+
+
+# Return one fault together with the persisted history immediately preceding it.
+# 返回一条故障以及故障发生前已保存的设备历史。
+class FaultContextResponse(ContractModel):
+    fault: FaultEventResponse
+    window_start: datetime
+    window_end: datetime
+    sensor_readings: list[SensorReadingResponse]
+    state_events: list[MachineStateEventResponse]
+    data_events: list[DataEventResponse]
 
 
 # --------- Error State ----------

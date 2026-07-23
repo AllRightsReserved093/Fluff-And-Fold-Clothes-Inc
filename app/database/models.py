@@ -1,5 +1,5 @@
-# Define persistent models for machines, state events, sensor readings, and faults.
-# 定义机器、状态事件、传感器读数和故障的持久化模型。
+# Define persistent models for machines, state events, data events, sensor readings, and faults.
+# 定义机器、状态事件、数据事件、传感器读数和故障的持久化模型。
 
 from datetime import datetime
 from typing import Any
@@ -77,6 +77,9 @@ class MachineRecord(Base):
     fault_events: Mapped[list["FaultEventRecord"]] = relationship(
         back_populates="machine"
     )
+    data_events: Mapped[list["DataEventRecord"]] = relationship(
+        back_populates="machine"
+    )
 
 
 # --------- Machine State Events ---------
@@ -150,6 +153,50 @@ class MachineStateEventRecord(Base):
     reason: Mapped[str | None] = mapped_column(Text)
 
     machine: Mapped[MachineRecord] = relationship(back_populates="state_events")
+
+
+# --------- Data Events ---------
+
+
+# Store immutable data-quality and report-consistency events.
+# 保存不可变的数据质量和报告一致性事件。
+class DataEventRecord(Base):
+    __tablename__ = "data_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "machine_id",
+            "report_id",
+            "event_code",
+            name="uq_data_events_machine_report_code",
+        ),
+        Index(
+            "ix_data_events_machine_recorded_at",
+            "machine_id",
+            "recorded_at",
+        ),
+    )
+
+    data_event_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    machine_id: Mapped[str] = mapped_column(
+        ForeignKey("machines.machine_id"),
+        nullable=False,
+    )
+    report_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    event_code: Mapped[str] = mapped_column(String(16), nullable=False)
+    event_message: Mapped[str] = mapped_column(Text, nullable=False)
+    event_details: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
+
+    machine: Mapped[MachineRecord] = relationship(back_populates="data_events")
 
 
 # --------- Sensor Readings ---------

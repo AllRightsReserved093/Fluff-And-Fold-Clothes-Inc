@@ -11,6 +11,8 @@ htmlcov/
 *.db
 *.sqlite
 *.sqlite3
+fault_snapshots/
+tests/artifacts/*.json
 .env
 .idea/
 .vscode/

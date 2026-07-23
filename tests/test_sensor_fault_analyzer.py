@@ -12,9 +12,10 @@ from laundry_contracts.contracts import (
     WasherCyclePhase,
     WasherPeriodicReport,
 )
+from laundry_contracts.fault_codes import DiagnosticCode
 
 
-def test_washer_analyzer_detects_running_safety_faults() -> None:
+def test_washer_analyzer_detects_sensor_warnings() -> None:
     report = WasherPeriodicReport(
         machine_id="washer-01",
         machine_type=MachineType.WASHER,
@@ -29,9 +30,8 @@ def test_washer_analyzer_detects_running_safety_faults() -> None:
     detected_faults = detect_sensor_faults(report)
 
     assert set(detected_faults) == {
-        "excessive_vibration",
-        "door_unlocked_while_running",
-        "washer_water_temperature_high",
+        DiagnosticCode.EXCESSIVE_VIBRATION.value,
+        DiagnosticCode.WASHER_WATER_TEMPERATURE_HIGH.value,
     }
 
 
@@ -50,8 +50,8 @@ def test_dryer_analyzer_detects_temperature_and_air_flow_faults() -> None:
     detected_faults = detect_sensor_faults(report)
 
     assert set(detected_faults) == {
-        "dryer_air_temperature_high",
-        "dryer_air_flow_low",
+        DiagnosticCode.DRYER_AIR_TEMPERATURE_HIGH.value,
+        DiagnosticCode.DRYER_AIR_FLOW_LOW.value,
     }
 
 

@@ -12,6 +12,7 @@ from laundry_contracts.contracts import (
     ErrorResolutionReport,
     PeriodicReport,
     ReportAcceptedResponse,
+    ReportProcessingResult,
 )
 
 
@@ -25,7 +26,8 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 def receive_periodic_report(
     report: PeriodicReport,
 ) -> ReportAcceptedResponse:
-    if not machine_service.handle_periodic_report(report):
+    processing_result = machine_service.handle_periodic_report(report)
+    if processing_result is ReportProcessingResult.NOT_FOUND:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Machine is not registered",
@@ -35,6 +37,7 @@ def receive_periodic_report(
         machine_id=report.machine_id,
         report_id=report.report_id,
         accepted_at=datetime.now(UTC),
+        is_duplicate=processing_result is ReportProcessingResult.DUPLICATE,
     )
 
 
@@ -42,7 +45,8 @@ def receive_periodic_report(
 def receive_change_of_state_report(
     report: ChangeOfStateReport,
 ) -> ReportAcceptedResponse:
-    if not machine_service.handle_change_of_state_report(report):
+    processing_result = machine_service.handle_change_of_state_report(report)
+    if processing_result is ReportProcessingResult.NOT_FOUND:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Machine is not registered",
@@ -52,6 +56,7 @@ def receive_change_of_state_report(
         machine_id=report.machine_id,
         report_id=report.report_id,
         accepted_at=datetime.now(UTC),
+        is_duplicate=processing_result is ReportProcessingResult.DUPLICATE,
     )
 
 
@@ -59,7 +64,8 @@ def receive_change_of_state_report(
 def receive_error_report(
     report: ErrorReport,
 ) -> ReportAcceptedResponse:
-    if not machine_service.handle_error_report(report):
+    processing_result = machine_service.handle_error_report(report)
+    if processing_result is ReportProcessingResult.NOT_FOUND:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Machine is not registered",
@@ -69,16 +75,19 @@ def receive_error_report(
         machine_id=report.machine_id,
         report_id=report.report_id,
         accepted_at=datetime.now(UTC),
+        is_duplicate=processing_result is ReportProcessingResult.DUPLICATE,
     )
 
 
 @router.post("/error-resolution", response_model=ReportAcceptedResponse)
 def receive_error_resolution_report(report: ErrorResolutionReport) -> ReportAcceptedResponse:
-    if not machine_service.handle_error_resolution_report(report):
+    processing_result = machine_service.handle_error_resolution_report(report)
+    if processing_result is ReportProcessingResult.NOT_FOUND:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Machine or fault not found")
 
     return ReportAcceptedResponse(
         machine_id=report.machine_id,
         report_id=report.report_id,
         accepted_at=datetime.now(UTC),
+        is_duplicate=processing_result is ReportProcessingResult.DUPLICATE,
     )

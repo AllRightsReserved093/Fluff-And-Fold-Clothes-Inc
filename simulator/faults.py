@@ -7,6 +7,7 @@ from typing import Protocol
 from uuid import uuid4
 
 from laundry_contracts.contracts import DryerCyclePhase, OperationState
+from laundry_contracts.fault_codes import DiagnosticCode
 
 
 BLOCKED_VENT_TRIP_TEMPERATURE = 110.0
@@ -46,11 +47,11 @@ class DryerFault(MachineFault, Protocol):
 
 class BlockedVentFault:
     name = "blocked-vent"
-    error_code = "blocked_vent_overheat"
-    error_message = "Blocked dryer vent caused unsafe temperature and airflow"
-    resolution_message = "Blocked vent was cleared and sensor readings returned to a safe range"
-    trip_reason = "Blocked dryer vent caused protective shutdown"
-    repair_reason = "Blocked vent repaired"
+    error_code = DiagnosticCode.DRYER_OVERTEMPERATURE_TRIP.value
+    error_message = "Dryer overtemperature protection was activated"
+    resolution_message = "Dryer temperature and airflow returned to a safe range after repair"
+    trip_reason = "Dryer overtemperature protection activated"
+    repair_reason = "Dryer repaired after overtemperature trip"
     injection_error_message = "Blocked vent requires a running heating or drying stage"
 
     def __init__(self) -> None:
