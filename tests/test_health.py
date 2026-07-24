@@ -1,5 +1,4 @@
 # Verify the public health-check contract through the ASGI application.
-# 通过 ASGI 应用验证公开的健康检查接口契约。
 
 import asyncio
 
@@ -12,7 +11,6 @@ app = main_module.app
 
 
 # Send a request without starting a network server.
-# 无需启动网络服务器即可发送请求。
 async def get_health_response() -> Response:
     transport = ASGITransport(app=app)
     async with AsyncClient(
@@ -29,26 +27,29 @@ def test_health_check() -> None:
     assert response.json() == {"status": "ok"}
 
 
-def test_application_lifespan_initializes_database(monkeypatch) -> None:
-    initialization_calls: list[bool] = []
-    shutdown_calls: list[bool] = []
+def test_application_lifespan_initializes_and_restores_database(monkeypatch) -> None:
+    lifecycle_calls: list[str] = []
     monkeypatch.setattr(
         main_module,
         "initialize_database",
-        lambda: initialization_calls.append(True),
+        lambda: lifecycle_calls.append("initialize"),
+    )
+    monkeypatch.setattr(
+        main_module.machine_service,
+        "restore_from_database",
+        lambda: lifecycle_calls.append("restore"),
     )
     monkeypatch.setattr(
         main_module.machine_service,
         "shutdown",
-        lambda: shutdown_calls.append(True),
+        lambda: lifecycle_calls.append("shutdown"),
     )
     test_application = main_module.create_app()
 
     async def run_lifespan() -> None:
         async with test_application.router.lifespan_context(test_application):
-            pass
+            assert lifecycle_calls == ["initialize", "restore"]
 
     asyncio.run(run_lifespan())
 
-    assert initialization_calls == [True]
-    assert shutdown_calls == [True]
+    assert lifecycle_calls == ["initialize", "restore", "shutdown"]

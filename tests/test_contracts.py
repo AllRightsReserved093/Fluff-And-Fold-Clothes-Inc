@@ -1,5 +1,4 @@
 # Verify shared wire contracts and their structural validation rules.
-# 验证共享传输契约及其结构校验规则。
 
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -193,7 +192,7 @@ def test_error_resolution_references_existing_error_only() -> None:
     assert resolution.special_sensor_readings.water_temperature == 20.0
 
     with pytest.raises(ValidationError):
-        WasherErrorResolutionReport(**resolution.model_dump(), error_code="door_fault")
+        WasherErrorResolutionReport(**resolution.model_dump(), error_code=DiagnosticCode.DOOR_INTERLOCK_LOST.value)
 
 
 def test_error_report_rejects_cross_machine_sensor_payload() -> None:
@@ -203,7 +202,7 @@ def test_error_report_rejects_cross_machine_sensor_payload() -> None:
     payload.update(
         {
             "error_id": "error-01",
-            "error_code": "door_fault",
+            "error_code": DiagnosticCode.DOOR_INTERLOCK_LOST.value,
             "error_message": "Door did not lock",
             "error_source": "device",
         }
@@ -237,7 +236,7 @@ def test_machine_error_tracks_active_and_resolved_lifecycle() -> None:
     with pytest.raises(ValidationError):
         MachineError(
             error_id="error-01",
-            error_code="door_fault",
+            error_code=DiagnosticCode.DOOR_INTERLOCK_LOST.value,
             error_source=ErrorSource.DEVICE,
             raised_at="2026-07-20T12:00:00Z",
             resolved_at="2026-07-20T11:59:59Z",

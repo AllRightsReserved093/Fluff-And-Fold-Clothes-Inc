@@ -1,5 +1,4 @@
 # Define persistent models for machines, state events, data events, sensor readings, and faults.
-# 定义机器、状态事件、数据事件、传感器读数和故障的持久化模型。
 
 from datetime import datetime
 from typing import Any
@@ -64,7 +63,6 @@ class MachineRecord(Base):
     cycle_stage: Mapped[str | None] = mapped_column(String(64))
 
     # Server-observed last contact time, separate from the device event time.
-    # 服务端观察到的最后联系时间，与设备事件时间分开保存。
     last_online: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -85,6 +83,7 @@ class MachineRecord(Base):
 # --------- Machine State Events ---------
 
 
+# Persist one immutable machine state transition.
 class MachineStateEventRecord(Base):
     __tablename__ = "machine_state_events"
     __table_args__ = (
@@ -159,7 +158,6 @@ class MachineStateEventRecord(Base):
 
 
 # Store immutable data-quality and report-consistency events.
-# 保存不可变的数据质量和报告一致性事件。
 class DataEventRecord(Base):
     __tablename__ = "data_events"
     __table_args__ = (
@@ -202,6 +200,7 @@ class DataEventRecord(Base):
 # --------- Sensor Readings ---------
 
 
+# Persist one historical machine sensor reading.
 class SensorReadingRecord(Base):
     __tablename__ = "sensor_readings"
     __table_args__ = (
@@ -257,6 +256,7 @@ class SensorReadingRecord(Base):
 # --------- Fault Events ---------
 
 
+# Persist one fault from detection through acknowledgement and resolution.
 class FaultEventRecord(Base):
     __tablename__ = "fault_events"
     __table_args__ = (

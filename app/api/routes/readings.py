@@ -1,5 +1,4 @@
 # Provide operator-facing sensor reading query endpoints.
-# 提供面向操作员的传感器读数查询接口。
 
 from datetime import datetime
 from typing import Annotated
@@ -13,6 +12,7 @@ from laundry_contracts.contracts import OperationState, SensorReadingResponse
 router = APIRouter(prefix="/machines", tags=["readings"])
 
 
+# Return filtered sensor reading history for one machine.
 @router.get("/{machine_id}/readings", response_model=list[SensorReadingResponse])
 def list_machine_readings(
     machine_id: Annotated[str, Path(min_length=1, max_length=128)],

@@ -1,5 +1,4 @@
 # Detect sensor faults in periodic reports with explicit prototype thresholds.
-# 使用明确的原型阈值检测周期报告中的传感器故障。
 
 from laundry_contracts.contracts import (
     DryerErrorResolutionReport,
@@ -14,7 +13,6 @@ from laundry_contracts.fault_codes import DiagnosticCode
 
 
 # Prototype thresholds must be replaced with manufacturer-specific values later.
-# 这些原型阈值后续必须替换为设备制造商提供的实际数值。
 MAX_VIBRATION = 10.0
 MAX_WASHER_WATER_TEMPERATURE = 80.0
 MAX_DRYER_AIR_TEMPERATURE = 90.0
@@ -29,7 +27,6 @@ SENSOR_FAULT_ERROR_CODES = {
 
 
 # Return the active sensor fault codes and messages for one complete report.
-# 返回一份完整报告中当前存在的传感器故障代码与消息。
 def detect_sensor_faults(report: PeriodicReport | ErrorResolutionReport) -> dict[str, str]:
     detected_faults: dict[str, str] = {}
 

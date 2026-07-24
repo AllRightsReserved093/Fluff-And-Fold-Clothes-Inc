@@ -1,5 +1,4 @@
 # Verify operator-facing machine, reading, and fault query endpoints.
-# 验证面向操作员的机器、读数和故障查询接口。
 
 import asyncio
 
@@ -10,6 +9,7 @@ from app.api.routes import faults as fault_routes
 from app.api.routes import machines as machine_routes
 from app.api.routes import readings as reading_routes
 from app.main import app
+from laundry_contracts.fault_codes import DiagnosticCode
 
 
 class StubManagementService:
@@ -41,7 +41,7 @@ class StubManagementService:
             "machine_id": "washer-01",
             "report_id": "error-report-01",
             "error_id": "door-error-01",
-            "error_code": "door_fault",
+            "error_code": DiagnosticCode.DOOR_INTERLOCK_LOST.value,
             "error_message": "Door did not lock",
             "error_source": "device",
             "is_acknowledged": True,

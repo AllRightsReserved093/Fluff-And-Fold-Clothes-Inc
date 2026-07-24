@@ -1,5 +1,4 @@
 # Verify simulator workflows and fault reporting without a live backend.
-# 在不连接真实后端的情况下验证模拟器流程与故障报告。
 
 import json
 from queue import Queue
@@ -11,7 +10,7 @@ from laundry_contracts.contracts import DryerCyclePhase, OperationState, WasherC
 from laundry_contracts.fault_codes import DiagnosticCode
 from simulator.dryer import Dryer
 from simulator.faults import apply_blocked_vent
-from simulator.main import Command, create_machines, run_simulation
+from simulator.main import Command, create_machines, handle_command, parse_console_command, run_simulation
 from simulator.machine import REPORT_INTERVAL_SECONDS
 from simulator.washer import Washer
 
@@ -37,6 +36,14 @@ def test_simulator_creates_requested_machine_inventory() -> None:
     assert "washer-20" in machines
     assert "dryer-01" in machines
     assert "dryer-16" in machines
+    client.close()
+
+
+def test_simulator_uses_custom_api_base_url() -> None:
+    client, _ = create_recording_client()
+    machines = create_machines(client, "http://test/custom-api")
+
+    assert all(machine.api_base_url == "http://test/custom-api" for machine in machines.values())
     client.close()
 
 
@@ -68,12 +75,65 @@ def test_washer_advances_workflow_and_reports_every_fifteen_seconds() -> None:
     client.close()
 
 
-def test_washer_fault_commands_use_safe_placeholders() -> None:
-    client, _ = create_recording_client()
+def test_unbalanced_load_waits_for_spinning_and_freezes_until_repair() -> None:
+    client, requests = create_recording_client()
     washer = Washer("washer-01", client, "http://test/api/v1")
 
+    assert washer.register()
     assert not washer.inject_fault("blocked-vent")
-    assert not washer.repair()
+    assert not washer.inject_fault("unbalanced-load")
+
+    washer.tick(10.0)
+    assert washer.cycle_stage is WasherCyclePhase.FILLING
+    assert washer.inject_fault("unbalanced-load")
+
+    washer.tick(20.0)
+    assert washer.cycle_stage is WasherCyclePhase.WASHING
+    washer.tick(45.0)
+    assert washer.cycle_stage is WasherCyclePhase.DRAINING
+    washer.tick(20.0)
+    assert washer.cycle_stage is WasherCyclePhase.SPINNING
+
+    washer.tick(7.0)
+    assert washer.cycle_stage is WasherCyclePhase.SPINNING
+    assert washer.phase_elapsed_seconds == 0.0
+    assert washer.vibration == 11.0
+    assert washer.send_periodic_report()
+
+    assert washer.repair()
+    washer.tick(4.0)
+    assert washer.active_fault is None
+    assert washer.cycle_stage is WasherCyclePhase.SPINNING
+    assert washer.phase_elapsed_seconds == 0.0
+    assert washer.vibration == 4.0
+
+    periodic_payloads = [payload for path, payload in requests if path == "/api/v1/reports/periodic"]
+    assert periodic_payloads[-2]["general_sensor_readings"]["vibration"] == 11.0
+    assert periodic_payloads[-1]["general_sensor_readings"]["vibration"] == 4.0
+
+    washer.tick(30.0)
+    assert washer.operation_state is OperationState.COMPLETE
+    client.close()
+
+
+def test_offline_and_online_commands_toggle_machine_communication() -> None:
+    client, _ = create_recording_client()
+    washer = Washer("washer-01", client, "http://test/api/v1")
+    machines = {washer.machine_id: washer}
+
+    offline_command, selected_machine_id = parse_console_command("offline", washer.machine_id, set(machines))
+    assert offline_command == ("offline", washer.machine_id, None)
+    assert selected_machine_id == washer.machine_id
+    assert handle_command(offline_command, machines)
+    assert not washer.is_communication_enabled
+    assert "signals=off" in washer.status_line()
+
+    online_command, selected_machine_id = parse_console_command("online", washer.machine_id, set(machines))
+    assert online_command == ("online", washer.machine_id, None)
+    assert selected_machine_id == washer.machine_id
+    assert handle_command(online_command, machines)
+    assert washer.is_communication_enabled
+    assert "signals=on" in washer.status_line()
     client.close()
 
 

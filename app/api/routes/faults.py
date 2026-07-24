@@ -1,5 +1,4 @@
 # Provide operator-facing fault management endpoints.
-# 提供面向操作员的故障管理接口。
 
 from typing import Annotated
 
@@ -18,6 +17,7 @@ from laundry_contracts.contracts import (
 router = APIRouter(tags=["faults"])
 
 
+# Return filtered fault events across all registered machines.
 @router.get("/faults", response_model=list[FaultEventResponse])
 def list_faults(
     active: Annotated[bool | None, Query()] = None,
@@ -28,6 +28,7 @@ def list_faults(
     return faults if faults is not None else []
 
 
+# Return one fault together with its preceding machine history.
 @router.get("/faults/{fault_event_id}/context", response_model=FaultContextResponse)
 def get_fault_context(
     fault_event_id: Annotated[int, Path(ge=1)],
@@ -39,6 +40,7 @@ def get_fault_context(
     return fault_context
 
 
+# Return filtered fault events for one registered machine.
 @router.get("/machines/{machine_id}/faults", response_model=list[FaultEventResponse])
 def list_machine_faults(
     machine_id: Annotated[str, Path(min_length=1, max_length=128)],
@@ -53,7 +55,6 @@ def list_machine_faults(
 
 
 # Acknowledge one known machine fault without resolving it.
-# 确认一条已知机器故障，但不解除该故障。
 @router.post("/machines/{machine_id}/faults/{error_id}/acknowledge", response_model=FaultAcknowledgementResponse)
 def acknowledge_fault(
     machine_id: Annotated[str, Path(min_length=1, max_length=128)],
@@ -73,7 +74,6 @@ def acknowledge_fault(
 
 
 # Manually resolve one known machine fault without deleting its history.
-# 手动解除一条已知机器故障，但不删除其历史记录。
 @router.post("/machines/{machine_id}/faults/{error_id}/resolve", response_model=FaultResolutionResponse)
 def resolve_fault(
     machine_id: Annotated[str, Path(min_length=1, max_length=128)],

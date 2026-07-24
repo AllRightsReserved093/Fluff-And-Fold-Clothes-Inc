@@ -1,5 +1,4 @@
 # Aggregate versioned API routes in one router.
-# 将版本化 API 路由集中到一个路由器中。
 
 from fastapi import APIRouter
 

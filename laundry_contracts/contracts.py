@@ -1,5 +1,4 @@
 # Define shared wire data types and pure validation helpers.
-# 定义共享的传输数据类型与纯校验辅助函数。
 
 from datetime import UTC, datetime
 import enum
@@ -14,7 +13,7 @@ from pydantic import (
     model_validator,
 )
 
-# --------- Shared Validation Types ----------
+# --------- Shared Validation Types ---------
 
 Identifier: TypeAlias = Annotated[str, Field(min_length=1, max_length=128)]
 
@@ -30,7 +29,6 @@ Percentage: TypeAlias = Annotated[float, Field(ge=0, le=100, allow_inf_nan=False
 
 
 # Reject unknown fields while preserving normal JSON parsing behavior.
-# 拒绝未知字段，同时保留正常的 JSON 类型解析行为。
 class ContractModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -40,7 +38,6 @@ class ContractModel(BaseModel):
 
 
 # Normalize one timezone-aware datetime to UTC.
-# 将一个带时区的时间归一化为 UTC。
 def normalize_to_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         raise ValueError("datetime must include timezone information")
@@ -48,9 +45,10 @@ def normalize_to_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-# --------- Enumerations ----------
+# --------- Enumerations ---------
 
 
+# Enumerate the operational states shared by all machine types.
 class OperationState(str, enum.Enum):
     IDLE = "idle"
     RUNNING = "running"
@@ -58,28 +56,33 @@ class OperationState(str, enum.Enum):
     COMPLETE = "complete"
     FAULTED = "faulted"
 
+# Enumerate the machine types supported by the system.
 class MachineType(str, enum.Enum):
     WASHER = "washer"
     DRYER = "dryer"
 
+# Enumerate the cycle phases reported by washers.
 class WasherCyclePhase(str, enum.Enum):
     FILLING = "filling"
     WASHING = "washing"
     DRAINING = "draining"
     SPINNING = "spinning"
 
+# Enumerate the cycle phases reported by dryers.
 class DryerCyclePhase(str, enum.Enum):
     HEATING = "heating"
     DRYING = "drying"
     COOLING = "cooling"
 
 
+# Identify the component that originally detected an error.
 class ErrorSource(str, enum.Enum):
     DEVICE = "device"
     HEARTBEAT_MONITOR = "heartbeat_monitor"
     ANALYTICS = "analytics"
 
 
+# Identify the source used to create a machine state event.
 class StateEventSource(str, enum.Enum):
     CHANGE_OF_STATE_REPORT = "change_of_state_report"
     PERIODIC_RECONCILIATION = "periodic_reconciliation"
@@ -88,57 +91,62 @@ class StateEventSource(str, enum.Enum):
 
 
 # Describe the outcome of processing one device report.
-# 描述一份设备报告的处理结果。
 class ReportProcessingResult(enum.Enum):
     ACCEPTED = enum.auto()
     DUPLICATE = enum.auto()
     NOT_FOUND = enum.auto()
 
-# --------- Sensor Readings ----------
+# --------- Sensor Readings ---------
 
+# Define sensor readings shared by washers and dryers.
 class GeneralSensorReadings(ContractModel):
     vibration: NonNegativeFiniteFloat = Field(description="Vibration acceleration in meters per second squared.")
     door_locked: bool
 
 
+# Define readings produced only by washers.
 class WasherSensorReadings(ContractModel):
     water_level: Percentage = Field(description="Water level as a percentage from 0 to 100.")
     water_temperature: FiniteFloat = Field(description="Water temperature in degrees Celsius.")
 
 
+# Define readings produced only by dryers.
 class DryerSensorReadings(ContractModel):
     air_temperature: FiniteFloat = Field(description="Air temperature in degrees Celsius.")
     # Air speed at the vent, can cause over heating if the vent is blocked
     air_flow_speed: NonNegativeFiniteFloat = Field(description="Air flow speed in meters per second.")
     moisture: Percentage = Field(description="Moisture as a percentage from 0 to 100.",)
 
-# --------- Machine Reports ----------
+# --------- Machine Reports ---------
 
 # Common envelope for one device event.
-# 单次设备事件的公共信封结构。
 class BaseMachineReport(ContractModel):
     machine_id: Identifier
     machine_type: MachineType
     report_id: Identifier
     recorded_at: AwareDatetime # Device-recorded event time.
 
+    # Normalize the device event timestamp to UTC.
     @field_validator("recorded_at")
     @classmethod
     def normalize_recorded_at(cls, recorded_at: datetime) -> datetime:
         return normalize_to_utc(recorded_at)
 
+# Define state-transition fields shared by washer and dryer reports.
 class BaseChangeOfStateReport(BaseMachineReport):
     previous_operation_state: OperationState
     new_operation_state: OperationState
     reason: MessageText | None = None
 
 
+# Define a washer state-change report.
 class WasherChangeOfStateReport(BaseChangeOfStateReport):
     machine_type: Literal[MachineType.WASHER]
     previous_cycle_stage: WasherCyclePhase | None
     new_cycle_stage: WasherCyclePhase | None
 
 
+# Define a dryer state-change report.
 class DryerChangeOfStateReport(BaseChangeOfStateReport):
     machine_type: Literal[MachineType.DRYER]
     previous_cycle_stage: DryerCyclePhase | None
@@ -150,17 +158,20 @@ ChangeOfStateReport: TypeAlias = Annotated[
     Field(discriminator="machine_type"),
 ]
 
+# Define fields shared by all periodic sensor reports.
 class BasePeriodicReport(BaseMachineReport):
     operation_state: OperationState
     general_sensor_readings: GeneralSensorReadings
 
 
+# Define one periodic washer report.
 class WasherPeriodicReport(BasePeriodicReport):
     machine_type: Literal[MachineType.WASHER]
     cycle_stage: WasherCyclePhase | None
     special_sensor_readings: WasherSensorReadings
 
 
+# Define one periodic dryer report.
 class DryerPeriodicReport(BasePeriodicReport):
     machine_type: Literal[MachineType.DRYER]
     cycle_stage: DryerCyclePhase | None
@@ -168,13 +179,13 @@ class DryerPeriodicReport(BasePeriodicReport):
 
 
 # Select the report branch in O(1) from machine_type.
-# 根据 machine_type 以 O(1) 选择报告分支。
 PeriodicReport: TypeAlias = Annotated[
     WasherPeriodicReport | DryerPeriodicReport,
     Field(discriminator="machine_type"),
 ]
 
 
+# Define fields shared by all device error reports.
 class BaseErrorReport(BaseMachineReport):
     error_id: Identifier
     error_code: ErrorCode
@@ -187,11 +198,13 @@ class BaseErrorReport(BaseMachineReport):
     change_of_state_report: ChangeOfStateReport | None = None
 
 
+# Define one washer error report.
 class WasherErrorReport(BaseErrorReport):
     machine_type: Literal[MachineType.WASHER]
     special_sensor_readings: WasherSensorReadings
 
 
+# Define one dryer error report.
 class DryerErrorReport(BaseErrorReport):
     machine_type: Literal[MachineType.DRYER]
     special_sensor_readings: DryerSensorReadings
@@ -211,12 +224,14 @@ class BaseErrorResolutionReport(BaseMachineReport):
     general_sensor_readings: GeneralSensorReadings
 
 
+# Define one washer error-resolution report.
 class WasherErrorResolutionReport(BaseErrorResolutionReport):
     machine_type: Literal[MachineType.WASHER]
     cycle_stage: WasherCyclePhase | None
     special_sensor_readings: WasherSensorReadings
 
 
+# Define one dryer error-resolution report.
 class DryerErrorResolutionReport(BaseErrorResolutionReport):
     machine_type: Literal[MachineType.DRYER]
     cycle_stage: DryerCyclePhase | None
@@ -228,15 +243,15 @@ ErrorResolutionReport: TypeAlias = Annotated[
     Field(discriminator="machine_type"),
 ]
 
-# --------- Registration ----------
+# --------- Registration ---------
 
+# Define the payload used to register a machine.
 class RegistrationRequest(ContractModel):
     machine_id: Identifier
     machine_type: MachineType
     registered_at: AwareDatetime
 
     # Normalize registration timestamps to UTC after timezone validation.
-    # 校验时区后，将注册时间统一转换为 UTC。
     @field_validator("registered_at")
     @classmethod
     def normalize_registered_at(
@@ -246,11 +261,13 @@ class RegistrationRequest(ContractModel):
         return normalize_to_utc(registered_at)
 
 
+# Define the payload used to deregister a machine.
 class DeregistrationRequest(ContractModel):
     machine_id: Identifier
     deregistered_at: AwareDatetime
     reason: MessageText | None = None
 
+    # Normalize the deregistration timestamp to UTC.
     @field_validator("deregistered_at")
     @classmethod
     def normalize_deregistered_at(
@@ -260,9 +277,13 @@ class DeregistrationRequest(ContractModel):
         return normalize_to_utc(deregistered_at)
 
 
+# --------- API Responses ---------
+
+# Define the timestamp shared by successful API responses.
 class BaseAcceptedResponse(ContractModel):
     accepted_at: AwareDatetime
 
+    # Normalize the server acceptance timestamp to UTC.
     @field_validator("accepted_at")
     @classmethod
     def normalize_accepted_at(
@@ -272,50 +293,59 @@ class BaseAcceptedResponse(ContractModel):
         return normalize_to_utc(accepted_at)
 
 
+# Confirm that a machine registration was accepted.
 class RegistrationResponse(BaseAcceptedResponse):
     machine_id: Identifier
     machine_type: MachineType
 
 
+# Confirm that a machine deregistration was accepted.
 class DeregistrationResponse(BaseAcceptedResponse):
     machine_id: Identifier
 
 
+# Confirm whether a device report was newly accepted or duplicated.
 class ReportAcceptedResponse(BaseAcceptedResponse):
     machine_id: Identifier
     report_id: Identifier
     is_duplicate: bool = False
 
 
+# Confirm that an operator acknowledged a fault.
 class FaultAcknowledgementResponse(ContractModel):
     machine_id: Identifier
     error_id: Identifier
     is_acknowledged: Literal[True]
 
 
+# Define the optional message supplied during manual fault resolution.
 class FaultResolutionRequest(ContractModel):
     resolution_message: MessageText | None = None
 
 
+# Confirm that an operator manually resolved a fault.
 class FaultResolutionResponse(ContractModel):
     machine_id: Identifier
     error_id: Identifier
     is_resolved: Literal[True]
 
 
+# --------- Query Responses ---------
+
 # Describe the most recent sensor values held in memory for one machine.
-# 描述一台机器当前保存在内存中的最新传感器读数。
 class LatestSensorReading(ContractModel):
     recorded_at: AwareDatetime
     general_readings: GeneralSensorReadings
     special_readings: WasherSensorReadings | DryerSensorReadings
 
+    # Normalize the latest reading timestamp to UTC.
     @field_validator("recorded_at")
     @classmethod
     def normalize_recorded_at(cls, recorded_at: datetime) -> datetime:
         return normalize_to_utc(recorded_at)
 
 
+# Describe the current backend state exposed for one machine.
 class MachineStatusResponse(ContractModel):
     machine_id: Identifier
     machine_type: MachineType
@@ -329,6 +359,7 @@ class MachineStatusResponse(ContractModel):
     latest_reading: LatestSensorReading | None = None
 
 
+# Describe one persisted sensor reading.
 class SensorReadingResponse(ContractModel):
     reading_id: int
     machine_id: Identifier
@@ -341,6 +372,7 @@ class SensorReadingResponse(ContractModel):
     special_readings: dict[str, Any]
 
 
+# Describe one immutable data-quality event.
 class DataEventResponse(ContractModel):
     data_event_id: int
     machine_id: Identifier
@@ -352,6 +384,7 @@ class DataEventResponse(ContractModel):
     received_at: datetime
 
 
+# Describe one persisted machine state transition.
 class MachineStateEventResponse(ContractModel):
     state_event_id: int
     machine_id: Identifier
@@ -366,6 +399,7 @@ class MachineStateEventResponse(ContractModel):
     reason: MessageText | None
 
 
+# Describe one persisted fault lifecycle record.
 class FaultEventResponse(ContractModel):
     fault_event_id: int
     machine_id: Identifier
@@ -381,7 +415,6 @@ class FaultEventResponse(ContractModel):
 
 
 # Return one fault together with the persisted history immediately preceding it.
-# 返回一条故障以及故障发生前已保存的设备历史。
 class FaultContextResponse(ContractModel):
     fault: FaultEventResponse
     window_start: datetime
@@ -391,10 +424,9 @@ class FaultContextResponse(ContractModel):
     data_events: list[DataEventResponse]
 
 
-# --------- Error State ----------
+# --------- Error State ---------
 
 # Represent one server-side error record derived from device or server events.
-# 表示由设备或服务器事件产生的一条服务端错误记录。
 class MachineError(ContractModel):
     error_id: Identifier
     error_code: ErrorCode
@@ -404,6 +436,7 @@ class MachineError(ContractModel):
     raised_at: AwareDatetime
     resolved_at: AwareDatetime | None = None
 
+    # Normalize error lifecycle timestamps to UTC.
     @field_validator("raised_at", "resolved_at")
     @classmethod
     def normalize_error_time(cls, value: datetime | None) -> datetime | None:
@@ -412,12 +445,14 @@ class MachineError(ContractModel):
 
         return normalize_to_utc(value)
 
+    # Reject a resolution timestamp that predates the error.
     @model_validator(mode="after")
     def validate_resolution_time(self) -> "MachineError":
         if (self.resolved_at is not None and self.resolved_at < self.raised_at):
             raise ValueError("resolved_at cannot be earlier than raised_at")
         return self
 
+    # Report whether the error has not yet been resolved.
     @property
     def is_active(self) -> bool:
         return self.resolved_at is None

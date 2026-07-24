@@ -1,5 +1,4 @@
 # Verify UTC timestamp normalization and monotonic millisecond deadlines.
-# 验证 UTC 时间归一化与单调毫秒 deadline。
 
 from threading import Event
 from time import monotonic
@@ -48,9 +47,9 @@ def test_monitor_waits_until_millisecond_deadline(
     )
     timeout_event = Event()
     monitor = monitor_module.MachineMonitor(
-        lambda _machine_id: timeout_event.set()
+        lambda _machine_id, _recorded_at: timeout_event.set()
     )
-    monitor.add_machine(SimpleNamespace(machine_id="test-machine"))
+    monitor.add_machine(SimpleNamespace(machine_id="test-machine", recorded_at=None))
 
     started = monotonic()
     monitor.start_monitor()
@@ -81,7 +80,7 @@ def test_timeout_callback_runs_after_monitor_lock_is_released(
     lock_was_available: list[bool] = []
     timeout_event = Event()
 
-    def on_timeout(_machine_id: str) -> None:
+    def on_timeout(_machine_id: str, _recorded_at) -> None:
         lock_acquired = monitor.monitor_heap_lock.acquire(blocking=False)
         lock_was_available.append(lock_acquired)
         if lock_acquired:
@@ -89,7 +88,7 @@ def test_timeout_callback_runs_after_monitor_lock_is_released(
         timeout_event.set()
 
     monitor = monitor_module.MachineMonitor(on_timeout)
-    monitor.add_machine(SimpleNamespace(machine_id="test-machine"))
+    monitor.add_machine(SimpleNamespace(machine_id="test-machine", recorded_at=None))
     monitor.start_monitor()
     thread = monitor.monitor_thread
 
@@ -115,7 +114,7 @@ def test_monitor_waits_on_empty_heap_and_wakes_for_upsert(
     timed_out_machine_ids: list[str] = []
     timeout_event = Event()
 
-    def on_timeout(machine_id: str) -> None:
+    def on_timeout(machine_id: str, _recorded_at) -> None:
         timed_out_machine_ids.append(machine_id)
         timeout_event.set()
 
@@ -127,7 +126,7 @@ def test_monitor_waits_on_empty_heap_and_wakes_for_upsert(
 
     try:
         assert thread.is_alive()
-        monitor.update_machine("recovered-machine")
+        monitor.update_machine("recovered-machine", None)
         assert timeout_event.wait(timeout=1)
         assert timed_out_machine_ids == ["recovered-machine"]
         assert thread.is_alive()
@@ -138,10 +137,10 @@ def test_monitor_waits_on_empty_heap_and_wakes_for_upsert(
 
 
 def test_update_machine_does_not_create_duplicate_entries() -> None:
-    monitor = monitor_module.MachineMonitor(lambda _machine_id: None)
+    monitor = monitor_module.MachineMonitor(lambda _machine_id, _recorded_at: None)
 
-    monitor.update_machine("washer-01")
-    monitor.update_machine("washer-01")
+    monitor.update_machine("washer-01", None)
+    monitor.update_machine("washer-01", None)
 
     assert len(monitor.monitor_heapq) == 1
     assert monitor.monitor_heapq[0][1] == "washer-01"

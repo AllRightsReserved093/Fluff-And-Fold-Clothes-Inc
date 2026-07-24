@@ -1,5 +1,4 @@
 # Receive device reports and delegate processing to the machine service.
-# 接收设备报告，并将处理交给机器服务。
 
 from datetime import UTC, datetime
 
@@ -19,9 +18,10 @@ from laundry_contracts.contracts import (
 router = APIRouter(prefix="/reports", tags=["reports"])
 
 
-# --------- API Endpoints ----------
+# --------- API Endpoints ---------
 
 
+# Accept one periodic machine status and sensor report.
 @router.post("/periodic", response_model=ReportAcceptedResponse)
 def receive_periodic_report(
     report: PeriodicReport,
@@ -41,6 +41,7 @@ def receive_periodic_report(
     )
 
 
+# Accept one device state-change report.
 @router.post("/change-of-state", response_model=ReportAcceptedResponse)
 def receive_change_of_state_report(
     report: ChangeOfStateReport,
@@ -60,6 +61,7 @@ def receive_change_of_state_report(
     )
 
 
+# Accept one device fault report.
 @router.post("/error", response_model=ReportAcceptedResponse)
 def receive_error_report(
     report: ErrorReport,
@@ -79,6 +81,7 @@ def receive_error_report(
     )
 
 
+# Accept one device fault-resolution report.
 @router.post("/error-resolution", response_model=ReportAcceptedResponse)
 def receive_error_resolution_report(report: ErrorResolutionReport) -> ReportAcceptedResponse:
     processing_result = machine_service.handle_error_resolution_report(report)

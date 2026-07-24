@@ -1,5 +1,4 @@
 # Provide machine registration and deregistration endpoints.
-# 提供机器注册与注销接口。
 
 from datetime import UTC, datetime
 
@@ -17,6 +16,7 @@ from laundry_contracts.contracts import (
 router = APIRouter(prefix="/machines", tags=["machines"])
 
 
+# Register one machine with the backend service.
 @router.post(
     "/register",
     response_model=RegistrationResponse,
@@ -39,6 +39,7 @@ def register_machine(request: RegistrationRequest) -> RegistrationResponse:
     )
 
 
+# Deregister one machine from the backend service.
 @router.post(
     "/deregister",
     response_model=DeregistrationResponse,

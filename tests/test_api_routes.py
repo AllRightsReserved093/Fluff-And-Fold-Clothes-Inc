@@ -1,5 +1,4 @@
 # Verify the minimal machine and report API routing chain.
-# 验证最小机器与报告 API 路由链路。
 
 import asyncio
 

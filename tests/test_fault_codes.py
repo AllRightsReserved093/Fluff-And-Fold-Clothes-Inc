@@ -1,5 +1,4 @@
 # Verify that the executable diagnostic catalog remains complete and internally consistent.
-# 验证可执行诊断目录保持完整且内部一致。
 
 import re
 

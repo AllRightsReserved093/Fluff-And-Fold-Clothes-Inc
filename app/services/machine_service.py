@@ -1,5 +1,4 @@
 # Coordinate machine state, registration, reports, and heartbeat monitoring.
-# 协调机器状态、注册、报告与心跳监控。
 
 import logging
 from datetime import UTC, datetime
@@ -27,6 +26,8 @@ from laundry_contracts.contracts import (
     PeriodicReport,
     ReportProcessingResult,
     SensorReadingResponse,
+    DryerCyclePhase,
+    WasherCyclePhase
 )
 
 
@@ -34,28 +35,97 @@ logger = logging.getLogger(__name__)
 
 
 # Manage the in-memory machine registry and its monitor.
-# 管理内存中的机器注册表及其监控器。
 class MachineService:
-    machines_registry: dict[str, Machine]
-    machine_monitor: MachineMonitor
-    machines_lock: Lock
-    database_operation: DatabaseOperation
-    fault_snapshot_directory: Path | None
+    # --------- Service Lifecycle ---------
 
+    # Initialize the machine registry, heartbeat monitor, and persistence gateway.
     def __init__(self, machine_monitor: MachineMonitor | None = None, fault_snapshot_directory: Path | None = None) -> None:
         self.machines_registry: dict[str, Machine] = {}
-        self.machine_monitor = machine_monitor if machine_monitor is not None else MachineMonitor(self.handle_heartbeat_timeout)
-        self.machines_lock = Lock()
-        self.database_operation = DatabaseOperation()
-        self.fault_snapshot_directory = fault_snapshot_directory
+        self.machine_monitor: MachineMonitor = machine_monitor if machine_monitor is not None else MachineMonitor(self.handle_heartbeat_timeout)
+        self.machines_lock: Lock = Lock()
+        self.database_operation: DatabaseOperation = DatabaseOperation()
+        self.fault_snapshot_directory: Path | None = fault_snapshot_directory
 
     # Stop the heartbeat monitor owned by this service.
-    # 停止当前服务持有的心跳监控器。
     def shutdown(self) -> None:
         self.machine_monitor.end_monitor()
 
+    # Restore registered machines and their latest persisted state after startup.
+    def restore_from_database(self) -> None:
+        # SQLite returns datetimes without timezone information; stored times are UTC.
+        def restore_utc(value: datetime | None) -> datetime | None:
+            if value is None:
+                return None
+            if value.tzinfo is None:
+                return value.replace(tzinfo=UTC)
+            return value.astimezone(UTC)
+
+        with self.machines_lock:
+            with SessionFactory() as database_session:
+                machine_statuses = self.database_operation.list_machine_statuses(database_session, set())
+
+                for machine_status in machine_statuses:
+                    if not machine_status.is_registered:
+                        continue
+                    if machine_status.machine_id in self.machines_registry:
+                        continue
+
+                    machine = Machine(machine_status.machine_id, machine_status.machine_type)
+                    machine.is_registered = True
+                    machine.registered_at = restore_utc(machine_status.registered_at)
+                    machine.operation_state = machine_status.operation_state
+                    machine.last_online = restore_utc(machine_status.last_online)
+                    machine.recorded_at = restore_utc(machine_status.recorded_at)
+
+                    if machine_status.cycle_stage is not None:
+                        if machine.machine_type is MachineType.WASHER:
+                            machine.cycle_stage = WasherCyclePhase(machine_status.cycle_stage)
+                        else:
+                            machine.cycle_stage = DryerCyclePhase(machine_status.cycle_stage)
+
+                    readings = self.database_operation.list_sensor_readings(
+                        database_session,
+                        machine.machine_id,
+                        None,
+                        None,
+                        None,
+                        1,
+                    )
+                    if readings:
+                        latest_reading = readings[0]
+                        machine.update_latest_reading(
+                            restore_utc(latest_reading.recorded_at),
+                            latest_reading.general_readings,
+                            latest_reading.special_readings,
+                        )
+
+                    active_faults = self.database_operation.list_fault_events(
+                        database_session,
+                        machine.machine_id,
+                        True,
+                        None,
+                        1_000,
+                    )
+                    for fault in active_faults or []:
+                        machine.add_error(
+                            MachineError(
+                                error_id=fault.error_id,
+                                error_code=fault.error_code,
+                                error_message=fault.error_message,
+                                error_source=fault.error_source,
+                                is_acknowledged=fault.is_acknowledged,
+                                raised_at=restore_utc(fault.raised_at),
+                                resolved_at=restore_utc(fault.resolved_at),
+                            )
+                        )
+
+                    self.machines_registry[machine.machine_id] = machine
+                    self.machine_monitor.add_machine(machine)
+
+            if self.machines_registry and not self.machine_monitor.is_working:
+                self.machine_monitor.start_monitor()
+
     # Record a valid device contact and recover it when previously offline.
-    # 记录一次有效设备联系，并在机器此前离线时恢复上线。
     def _record_machine_contact(self, machine: Machine, recorded_at: datetime) -> None:
         machine.recorded_at = recorded_at
 
@@ -65,12 +135,9 @@ class MachineService:
 
         machine.recover_online()
 
-    def machine_monitor_shutdown(self) -> None:
-        self.machine_monitor.end_monitor()
-
+    # --------- Machine Registration ---------
 
     # Register one machine and add it to heartbeat monitoring.
-    # 注册一台机器，并将其加入心跳监控。
     def machine_register(self, machine_id: str, machine_type: MachineType) -> bool:
         with self.machines_lock:
             # Validation check
@@ -100,7 +167,6 @@ class MachineService:
             return True
 
     # Deregister one machine and remove it from heartbeat monitoring.
-    # 注销一台机器，并将其移出心跳监控。
     def machine_deregister(self, machine_id: str) -> bool:
         with self.machines_lock:
             # Validation check
@@ -121,8 +187,9 @@ class MachineService:
             del self.machines_registry[machine_id]
             return True
 
+    # --------- Machine Reports ---------
+
     # Apply a periodic report and refresh the machine heartbeat deadline.
-    # 应用周期报告，并刷新机器的心跳截止时间。
     def handle_periodic_report(self, report: PeriodicReport) -> ReportProcessingResult:
         with self.machines_lock:
             # Validation check
@@ -130,6 +197,9 @@ class MachineService:
             if machine is None:
                 print(f"Machine with ID {report.machine_id} was not registered.")
                 return ReportProcessingResult.NOT_FOUND
+
+            if machine.recorded_at is not None and machine.recorded_at > report.recorded_at:
+                return ReportProcessingResult.DUPLICATE
 
             detected_sensor_faults = detect_sensor_faults(report)
 
@@ -148,7 +218,6 @@ class MachineService:
             machine.update_latest_reading(report.recorded_at, report.general_sensor_readings, report.special_sensor_readings)
 
             # Update active sensor faults in memory.
-            # 更新内存中的活动传感器故障。
             for sensor_fault in active_sensor_faults:
                 if sensor_fault.error_id not in machine.error_list:
                     machine.add_error(sensor_fault)
@@ -158,17 +227,18 @@ class MachineService:
                     machine.remove_error(error_id)
 
             # Update the machine in the monitor
-            self.machine_monitor.update_machine(report.machine_id)
+            self.machine_monitor.update_machine(report.machine_id, machine.recorded_at)
             return ReportProcessingResult.ACCEPTED
 
     # Apply a state-change report and refresh the heartbeat deadline.
-    # 应用状态变化报告，并刷新心跳截止时间。
     def handle_change_of_state_report(self, report: ChangeOfStateReport) -> ReportProcessingResult:
         with self.machines_lock:
             # Validation check
             machine = self.machines_registry.get(report.machine_id)
             if machine is None:
                 return ReportProcessingResult.NOT_FOUND
+            if machine.recorded_at is not None and machine.recorded_at > report.recorded_at:
+                return ReportProcessingResult.DUPLICATE
 
             # Database operation
             with SessionFactory.begin() as database_session:
@@ -183,17 +253,18 @@ class MachineService:
             machine.update_state(report.new_operation_state, report.new_cycle_stage)
 
             # Update the machine in the monitor
-            self.machine_monitor.update_machine(report.machine_id)
+            self.machine_monitor.update_machine(report.machine_id, machine.recorded_at)
             return ReportProcessingResult.ACCEPTED
 
     # Apply an error report and refresh the machine heartbeat deadline.
-    # 应用错误报告，并刷新机器的心跳截止时间。
     def handle_error_report(self, report: ErrorReport) -> ReportProcessingResult:
         with self.machines_lock:
             # Validation check
             machine = self.machines_registry.get(report.machine_id)
             if machine is None:
                 return ReportProcessingResult.NOT_FOUND
+            if machine.recorded_at is not None and machine.recorded_at > report.recorded_at:
+                return ReportProcessingResult.DUPLICATE
 
             # Database operation
             with SessionFactory.begin() as database_session:
@@ -229,7 +300,7 @@ class MachineService:
                 machine.update_state(report.change_of_state_report.new_operation_state, report.change_of_state_report.new_cycle_stage)
 
             # Update the machine in the monitor
-            self.machine_monitor.update_machine(report.machine_id)
+            self.machine_monitor.update_machine(report.machine_id, machine.recorded_at)
 
             if fault_context is not None:
                 try:
@@ -240,13 +311,14 @@ class MachineService:
             return ReportProcessingResult.ACCEPTED
 
     # Apply a device error-resolution report and refresh the heartbeat deadline.
-    # 应用设备错误解除报告，并刷新心跳截止时间。
     def handle_error_resolution_report(self, report: ErrorResolutionReport) -> ReportProcessingResult:
         with self.machines_lock:
             # Validation check
             machine = self.machines_registry.get(report.machine_id)
             if machine is None:
                 return ReportProcessingResult.NOT_FOUND
+            if machine.recorded_at is not None and machine.recorded_at > report.recorded_at:
+                return ReportProcessingResult.DUPLICATE
 
             detected_sensor_faults = detect_sensor_faults(report)
 
@@ -262,6 +334,7 @@ class MachineService:
 
             # Update the machine state
             self._record_machine_contact(machine, report.recorded_at)
+            machine.update_state(report.operation_state, report.cycle_stage)
             machine.update_latest_reading(report.recorded_at, report.general_sensor_readings, report.special_sensor_readings)
             if report.error_id in machine.error_list:
                 machine.remove_error(report.error_id)
@@ -275,11 +348,12 @@ class MachineService:
                     machine.remove_error(error_id)
 
             # Update the machine in the monitor
-            self.machine_monitor.update_machine(report.machine_id)
+            self.machine_monitor.update_machine(report.machine_id, machine.recorded_at)
             return ReportProcessingResult.ACCEPTED
 
+    # --------- Fault Management ---------
+
     # Acknowledge one persisted machine error without resolving it.
-    # 确认一条已保存的机器错误，但不解除该错误。
     def acknowledge_error(self, machine_id: str, error_id: str) -> bool:
         with self.machines_lock:
             # Validation check
@@ -300,7 +374,6 @@ class MachineService:
             return True
 
     # Manually resolve one persisted machine error.
-    # 手动解除一条已保存的机器错误。
     def resolve_error(self, machine_id: str, error_id: str, resolution_message: str | None) -> bool:
         with self.machines_lock:
             # Validation check
@@ -319,91 +392,80 @@ class MachineService:
 
             return True
 
+    # --------- Heartbeat Monitoring ---------
+
     # Apply a heartbeat timeout reported by the monitor.
-    # 应用监控器报告的心跳超时。
-    def handle_heartbeat_timeout(self, machine_id: str) -> bool:
+    def handle_heartbeat_timeout(self, machine_id: str, expected_recorded_at: datetime | None) -> bool:
         with self.machines_lock:
             # Validation check
             machine = self.machines_registry.get(machine_id)
             if machine is None:
                 return False
-
-            # Update the machine state
-            machine.set_error_heartbeat_timeout()
+            if machine.recorded_at != expected_recorded_at:
+                return False
 
             # Database operation
-            heartbeat_error = list(machine.error_list.values())[-1]
+            heartbeat_error = machine.create_heartbeat_timeout_error()
             with SessionFactory.begin() as database_session:
                 if not self.database_operation.add_heartbeat_timeout(database_session, machine_id, heartbeat_error):
                     return False
 
+            # Update the machine state
+            machine.mark_offline()
+            machine.add_error(heartbeat_error)
             return True
 
+    # --------- Operator Queries ---------
+
+    # Convert one in-memory machine into its API status response.
+    def _create_machine_status(self, machine: Machine) -> MachineStatusResponse:
+        return MachineStatusResponse(
+            machine_id=machine.machine_id,
+            machine_type=machine.machine_type,
+            is_registered=machine.is_registered,
+            is_online=machine.is_online,
+            operation_state=machine.operation_state,
+            cycle_stage=machine.cycle_stage.value if machine.cycle_stage is not None else None,
+            registered_at=machine.registered_at,
+            last_online=machine.last_online,
+            recorded_at=machine.recorded_at,
+            latest_reading=machine.latest_reading,
+        )
+
     # Return all known machine statuses.
-    # 返回所有已知机器的状态。
     def list_machines(self) -> list[MachineStatusResponse]:
         with self.machines_lock:
-            online_machine_ids = set()
-            for machine_id, machine in self.machines_registry.items():
-                if machine.is_online:
-                    online_machine_ids.add(machine_id)
-
-            with SessionFactory() as database_session:
-                machine_statuses = self.database_operation.list_machine_statuses(database_session, online_machine_ids)
-
-            for machine_status in machine_statuses:
-                machine = self.machines_registry.get(machine_status.machine_id)
-                if machine is None:
-                    continue
-
-                machine_status.recorded_at = machine.recorded_at
-                machine_status.latest_reading = machine.latest_reading
-
-            return machine_statuses
+            machines = sorted(self.machines_registry.values(), key=lambda machine: machine.machine_id)
+            return [self._create_machine_status(machine) for machine in machines]
 
     # Return one known machine status.
-    # 返回一台已知机器的状态。
     def get_machine(self, machine_id: str) -> MachineStatusResponse | None:
         with self.machines_lock:
-            is_online = False
             machine = self.machines_registry.get(machine_id)
-            if machine is not None:
-                is_online = machine.is_online
-
-            with SessionFactory() as database_session:
-                machine_status = self.database_operation.get_machine_status(database_session, machine_id, is_online)
-
-            if machine_status is not None and machine is not None:
-                machine_status.recorded_at = machine.recorded_at
-                machine_status.latest_reading = machine.latest_reading
-
-            return machine_status
+            if machine is None:
+                return None
+            return self._create_machine_status(machine)
 
     # Return filtered sensor readings for one known machine.
-    # 返回一台已知机器经过筛选的传感器读数。
     def list_sensor_readings(self, machine_id: str, start_time: datetime | None, end_time: datetime | None, operation_state: OperationState | None, limit: int) -> list[SensorReadingResponse] | None:
         with SessionFactory() as database_session:
             return self.database_operation.list_sensor_readings(database_session, machine_id, start_time, end_time, operation_state, limit)
 
     # Return filtered immutable data events across all machines or one known machine.
-    # 返回所有机器或一台已知机器经过筛选的不可变数据事件。
     def list_data_events(self, machine_id: str | None, event_code: str | None, limit: int) -> list[DataEventResponse] | None:
         with SessionFactory() as database_session:
             return self.database_operation.list_data_events(database_session, machine_id, event_code, limit)
 
     # Return one fault with the persisted machine history preceding it.
-    # 返回一条故障及其发生前已保存的机器历史。
     def get_fault_context(self, fault_event_id: int, minutes: int) -> FaultContextResponse | None:
         with SessionFactory() as database_session:
             return self.database_operation.get_fault_context(database_session, fault_event_id, minutes)
 
     # Return filtered fault events across all machines or one known machine.
-    # 返回所有机器或一台已知机器经过筛选的故障事件。
     def list_faults(self, machine_id: str | None, is_active: bool | None, is_acknowledged: bool | None, limit: int) -> list[FaultEventResponse] | None:
         with SessionFactory() as database_session:
             return self.database_operation.list_fault_events(database_session, machine_id, is_active, is_acknowledged, limit)
 
 
 # Shared service instance for the application process.
-# 当前应用进程共享的服务实例。
 machine_service = MachineService(fault_snapshot_directory=DEFAULT_FAULT_SNAPSHOT_DIRECTORY)

@@ -1,10 +1,10 @@
 # Define the shared executable diagnostic code catalog.
-# 定义设备与后端共用的可执行诊断代码目录。
 
 from dataclasses import dataclass
 from enum import StrEnum, unique
 
 
+# Enumerate every diagnostic code accepted by the system.
 @unique
 class DiagnosticCode(StrEnum):
     EXCESSIVE_VIBRATION = "W1001"
@@ -18,6 +18,7 @@ class DiagnosticCode(StrEnum):
     STATE_SEQUENCE_MISMATCH = "D9002"
 
 
+# Classify diagnostics by their lifecycle and operational meaning.
 @unique
 class DiagnosticKind(StrEnum):
     WARNING = "warning"
@@ -26,6 +27,7 @@ class DiagnosticKind(StrEnum):
     DATA_EVENT = "data_event"
 
 
+# Rank the operational impact of a diagnostic.
 @unique
 class Severity(StrEnum):
     LOW = "low"
@@ -34,12 +36,14 @@ class Severity(StrEnum):
     CRITICAL = "critical"
 
 
+# Identify whether the device or server owns diagnostic detection.
 @unique
 class DetectionAuthority(StrEnum):
     DEVICE = "device"
     SERVER = "server"
 
 
+# Enumerate the machine action associated with a diagnostic.
 @unique
 class EquipmentAction(StrEnum):
     NONE = "none"
@@ -48,7 +52,6 @@ class EquipmentAction(StrEnum):
 
 
 # Describe the stable behavior attached to one diagnostic code.
-# 描述一个诊断代码对应的稳定行为。
 @dataclass(frozen=True)
 class DiagnosticDefinition:
     kind: DiagnosticKind

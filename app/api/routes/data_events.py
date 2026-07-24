@@ -1,5 +1,4 @@
 # Provide operator-facing immutable data event queries.
-# 提供面向操作员的不可变数据事件查询接口。
 
 from typing import Annotated
 
@@ -12,6 +11,7 @@ from laundry_contracts.contracts import DataEventResponse
 router = APIRouter(prefix="/data-events", tags=["data events"])
 
 
+# Return filtered immutable data events for operator diagnostics.
 @router.get("", response_model=list[DataEventResponse])
 def list_data_events(
     machine_id: Annotated[str | None, Query(min_length=1, max_length=128)] = None,

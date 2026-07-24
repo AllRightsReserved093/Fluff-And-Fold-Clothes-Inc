@@ -1,5 +1,4 @@
 # Simulate a dryer's workflow, blocked vent fault, and repair process.
-# 模拟烘干机工作流程、出风口堵塞故障与修复过程。
 
 from datetime import UTC, datetime
 
@@ -22,15 +21,19 @@ DRYER_PHASE_DURATIONS = {
 }
 
 
+# Simulate dryer cycles, readings, reports, and injected faults.
 class Dryer(Machine):
-    active_fault: DryerFault | None
+    # --------- Simulation Workflow ---------
 
+    # Initialize dryer-specific sensor values.
     def __init__(self, machine_id: str, http_client: httpx.Client, api_base_url: str) -> None:
         super().__init__(machine_id, MachineType.DRYER, http_client, api_base_url)
-        self.air_temperature = 25.0
-        self.air_flow_speed = 0.0
-        self.moisture = 70.0
+        self.active_fault: DryerFault | None = None
+        self.air_temperature: float = 25.0
+        self.air_flow_speed: float = 0.0
+        self.moisture: float = 70.0
 
+    # Advance the dryer workflow or its active fault.
     def tick(self, elapsed_seconds: float) -> None:
         if not self.is_registered:
             return
@@ -76,6 +79,7 @@ class Dryer(Machine):
             # Move to the next phase
             self._transition(OperationState.RUNNING, DRYER_STAGES[stage_index + 1], "Automatic cycle stage advanced")
 
+    # Update normal dryer sensor values for the current cycle phase.
     def _update_readings(self, elapsed_seconds: float) -> None:
         if self.cycle_stage is DryerCyclePhase.HEATING:
             self.air_temperature = min(60.0, self.air_temperature + 2.0 * elapsed_seconds)
@@ -90,6 +94,7 @@ class Dryer(Machine):
             self.air_flow_speed = 2.0
             self.moisture = max(5.0, self.moisture - 0.25 * elapsed_seconds)
 
+    # Apply and report one dryer state transition.
     def _transition(self, new_operation_state: OperationState, new_cycle_stage: DryerCyclePhase | None, reason: str) -> None:
         previous_operation_state = self.operation_state
         previous_cycle_stage = self.cycle_stage
@@ -133,6 +138,9 @@ class Dryer(Machine):
 
         self.post("/reports/change-of-state", report, {200})
 
+    # --------- Fault Handling ---------
+
+    # Activate one supported dryer fault when its preconditions are met.
     def inject_fault(self, fault_name: str) -> bool:
         fault = create_dryer_fault(fault_name)
         if fault is None:
@@ -149,6 +157,7 @@ class Dryer(Machine):
         print(f"[{self.machine_id}] Injected fault: {fault_name}")
         return True
 
+    # Report the active dryer fault and its protective shutdown.
     def _report_active_fault(self) -> None:
         # Check if a fault is active
         fault = self.active_fault
@@ -191,6 +200,7 @@ class Dryer(Machine):
         self.post("/reports/error", error_report, {200})
         print(f"[{self.machine_id}] Protective shutdown: {fault.error_code}")
 
+    # Report repair completion and return the dryer to idle.
     def _resolve_active_fault(self) -> None:
         # Check if active fault exists
         fault = self.active_fault
@@ -215,6 +225,9 @@ class Dryer(Machine):
         self._transition(OperationState.IDLE, None, fault.repair_reason)
         print(f"[{self.machine_id}] Repair completed")
 
+    # --------- Reporting and Status ---------
+
+    # Send the dryer's current state and readings to the backend.
     def send_periodic_report(self) -> bool:
         report = DryerPeriodicReport(
             machine_id=self.machine_id,
@@ -228,7 +241,9 @@ class Dryer(Machine):
         )
         return self.post("/reports/periodic", report, {200})
 
+    # Return a compact dryer status for the simulator console.
     def status_line(self) -> str:
         stage = self.cycle_stage.value if self.cycle_stage is not None else "none"
         fault = f", fault={self.active_fault.name}" if self.active_fault is not None else ""
-        return f"{self.machine_id}: state={self.operation_state.value}, stage={stage}, temperature={self.air_temperature:.1f}C, airflow={self.air_flow_speed:.1f}m/s, moisture={self.moisture:.1f}%{fault}"
+        signals = "on" if self.is_communication_enabled else "off"
+        return f"{self.machine_id}: state={self.operation_state.value}, stage={stage}, temperature={self.air_temperature:.1f}C, airflow={self.air_flow_speed:.1f}m/s, moisture={self.moisture:.1f}%, signals={signals}{fault}"

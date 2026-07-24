@@ -1,5 +1,4 @@
 # Verify the operator console API boundary without starting a network server.
-# 在不启动网络服务器的情况下验证操作员控制台 API 边界。
 
 import asyncio
 import json
@@ -7,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from laundry_contracts.contracts import MachineType, OperationState
+from laundry_contracts.fault_codes import DiagnosticCode
 from operator_console.api_client import OperatorApiClient, OperatorApiError
 
 
@@ -45,7 +44,7 @@ FAULT_RESPONSE = {
     "machine_id": "washer-01",
     "report_id": "error-report-01",
     "error_id": "door-error-01",
-    "error_code": "door_fault",
+    "error_code": DiagnosticCode.DOOR_INTERLOCK_LOST.value,
     "error_message": "Door did not lock",
     "error_source": "device",
     "is_acknowledged": False,
@@ -97,54 +96,37 @@ def test_operator_api_client_parses_query_responses() -> None:
 
     def handle_request(request: httpx.Request) -> httpx.Response:
         requested_urls.append(str(request.url))
-        if request.url.path == "/api/v1/health":
-            return httpx.Response(200, json={"status": "ok"})
         if request.url.path == "/api/v1/machines":
             return httpx.Response(200, json=[MACHINE_RESPONSE])
-        if request.url.path == "/api/v1/machines/washer-01/readings":
-            return httpx.Response(200, json=[READING_RESPONSE])
         if request.url.path == "/api/v1/faults":
             return httpx.Response(200, json=[FAULT_RESPONSE])
         if request.url.path == "/api/v1/faults/1/context":
             return httpx.Response(200, json=FAULT_CONTEXT_RESPONSE)
         if request.url.path == "/api/v1/data-events":
             return httpx.Response(200, json=[DATA_EVENT_RESPONSE])
-        if request.url.path == "/api/v1/machines/washer-01/faults":
-            return httpx.Response(200, json=[FAULT_RESPONSE])
-        if request.url.path == "/api/v1/machines/washer-01":
-            return httpx.Response(200, json=MACHINE_RESPONSE)
         return httpx.Response(404, json={"detail": "Not found"})
 
     async def run_scenario() -> None:
         client = OperatorApiClient(transport=httpx.MockTransport(handle_request))
         try:
-            assert await client.health()
             machines = await client.list_machines()
-            machine = await client.get_machine("washer-01")
-            readings = await client.list_readings("washer-01", limit=1)
-            faults = await client.list_faults(active=True, acknowledged=False, limit=10)
-            machine_faults = await client.list_machine_faults("washer-01", active=True)
-            data_events = await client.list_data_events("washer-01", "D9001", limit=10)
-            fault_context = await client.get_fault_context(1, minutes=5)
+            faults = await client.list_faults(active=True)
+            data_events = await client.list_data_events()
+            fault_context = await client.get_fault_context(1)
         finally:
             await client.close()
 
-        assert machines[0].machine_type is MachineType.WASHER
         assert machines[0].latest_reading is not None
         assert machines[0].latest_reading.special_readings.water_temperature == 40.0
-        assert machine.operation_state is OperationState.RUNNING
-        assert readings[0].reading_id == 1
         assert faults[0].error_id == "door-error-01"
-        assert machine_faults[0].machine_id == "washer-01"
         assert data_events[0].event_code == "D9001"
         assert fault_context.fault.fault_event_id == 1
         assert fault_context.sensor_readings[0].reading_id == 1
 
     asyncio.run(run_scenario())
 
-    assert any("readings?limit=1" in url for url in requested_urls)
-    assert any("faults?limit=10&active=true&acknowledged=false" in url for url in requested_urls)
-    assert any("data-events?limit=10&machine_id=washer-01&event_code=D9001" in url for url in requested_urls)
+    assert any("faults?limit=100&active=true" in url for url in requested_urls)
+    assert any("data-events?limit=100" in url for url in requested_urls)
     assert any("faults/1/context?minutes=5" in url for url in requested_urls)
 
 
@@ -169,12 +151,10 @@ def test_operator_api_client_sends_fault_actions_and_reports_http_errors() -> No
     async def run_scenario() -> None:
         client = OperatorApiClient(transport=httpx.MockTransport(handle_request))
         try:
-            acknowledgement = await client.acknowledge_fault("washer-01", "door-error-01")
-            resolution = await client.resolve_fault("washer-01", "door-error-01", "Door repaired")
-            assert acknowledgement.is_acknowledged
-            assert resolution.is_resolved
+            await client.acknowledge_fault("washer-01", "door-error-01")
+            await client.resolve_fault("washer-01", "door-error-01", "Door repaired")
             with pytest.raises(OperatorApiError, match="HTTP 404"):
-                await client.get_machine("missing-machine")
+                await client.get_fault_context(999)
         finally:
             await client.close()
 

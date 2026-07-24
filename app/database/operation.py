@@ -1,5 +1,4 @@
 # Persist machine registration, reports, faults, data events, and heartbeat events.
-# 持久化机器注册、报告、故障、数据事件与心跳事件。
 
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -35,10 +34,12 @@ from laundry_contracts.contracts import (
 from laundry_contracts.fault_codes import DiagnosticCode
 
 
+# Encapsulate all database reads and writes used by the service layer.
 class DatabaseOperation:
+    # --------- Machine Records ---------
+
     # Add a new machine record or reactivate an existing record.
-    # 新增机器记录，或重新启用已有记录。
-    def add_machine_record(self, database_session: Session, machine: Machine, registered_at: datetime):
+    def add_machine_record(self, database_session: Session, machine: Machine, registered_at: datetime) -> None:
 
         machine_record = database_session.get(MachineRecord, machine.machine_id)
         cycle_stage = machine.cycle_stage.value if machine.cycle_stage is not None else None
@@ -77,7 +78,6 @@ class DatabaseOperation:
         return True
 
     # Update one machine's latest valid device contact.
-    # 更新一台机器最近一次有效的设备联系时间。
     def update_machine_contact(self, database_session: Session, machine_id: str, recorded_at: datetime) -> bool:
         machine_record = database_session.get(MachineRecord, machine_id)
         if machine_record is None or not machine_record.is_registered:
@@ -86,6 +86,8 @@ class DatabaseOperation:
         machine_record.last_online = datetime.now(UTC)
         machine_record.recorded_at = recorded_at
         return True
+
+    # --------- Machine Reports ---------
 
     # Store a periodic reading and reconcile the current machine snapshot.
     def add_periodic_report(self, database_session: Session, report: PeriodicReport) -> ReportProcessingResult:
@@ -238,6 +240,8 @@ class DatabaseOperation:
         machine_record.recorded_at = report.recorded_at
         return ReportProcessingResult.ACCEPTED
 
+    # --------- Fault Records ---------
+
     # Store an error report.
     def add_error_report(self, database_session: Session, report: ErrorReport) -> ReportProcessingResult:
         machine_record = database_session.get(MachineRecord, report.machine_id)
@@ -352,7 +356,6 @@ class DatabaseOperation:
         return True
 
     # Store recovery readings and resolve the matching device fault.
-    # 保存恢复后的读数，并解除对应的设备故障。
     def add_error_resolution_report(self, database_session: Session, report: ErrorResolutionReport) -> ReportProcessingResult:
         machine_record = database_session.get(MachineRecord, report.machine_id)
         if machine_record is None or not machine_record.is_registered:
@@ -382,10 +385,11 @@ class DatabaseOperation:
                 special_readings=report.special_sensor_readings.model_dump(mode="json"),
             )
         )
+        machine_record.operation_state = report.operation_state
+        machine_record.cycle_stage = cycle_stage
         return ReportProcessingResult.ACCEPTED
 
     # Resolve one persisted fault without deleting its history.
-    # 解除一条已保存的故障，但保留其历史记录。
     def resolve_fault_event(self, database_session: Session, machine_id: str, error_id: str, resolved_at: datetime, resolution_message: str | None) -> bool:
         fault_event = database_session.scalar(
             select(FaultEventRecord).where(
@@ -400,6 +404,8 @@ class DatabaseOperation:
             fault_event.resolved_at = resolved_at
             fault_event.resolution_message = resolution_message
         return True
+
+    # --------- Heartbeat Records ---------
 
     # Store one heartbeat timeout fault event.
     def add_heartbeat_timeout(self, database_session: Session, machine_id: str, error: MachineError) -> bool:
@@ -446,8 +452,9 @@ class DatabaseOperation:
 
         return len(fault_events)
 
+    # --------- Sensor Fault Reconciliation ---------
+
     # Create, retain, or automatically resolve detected sensor faults.
-    # 新增、保留或自动解除检测到的传感器故障。
     def reconcile_sensor_faults(self, database_session: Session, report: PeriodicReport | ErrorResolutionReport, detected_sensor_faults: dict[str, str], managed_error_codes: set[str]) -> tuple[list[MachineError], list[str]]:
         active_fault_events = database_session.scalars(
             select(FaultEventRecord).where(
@@ -496,13 +503,14 @@ class DatabaseOperation:
                 continue
 
             fault_event.resolved_at = report.recorded_at
-            fault_event.resolution_message = "Sensor readings returned to normal"
+            fault_event.resolution_message = "Fault detection condition is no longer active"
             resolved_error_ids.append(fault_event.error_id)
 
         return active_errors, resolved_error_ids
 
+    # --------- Database Queries ---------
+
     # Return every stored machine status with its runtime online state.
-    # 返回所有已保存的机器状态及其运行时在线状态。
     def list_machine_statuses(self, database_session: Session, online_machine_ids: set[str]) -> list[MachineStatusResponse]:
         machine_records = database_session.scalars(select(MachineRecord).order_by(MachineRecord.machine_id)).all()
         machine_statuses = []
@@ -525,7 +533,6 @@ class DatabaseOperation:
         return machine_statuses
 
     # Return one stored machine status by ID.
-    # 根据 ID 返回一条已保存的机器状态。
     def get_machine_status(self, database_session: Session, machine_id: str, is_online: bool) -> MachineStatusResponse | None:
         machine_record = database_session.get(MachineRecord, machine_id)
         if machine_record is None:
@@ -544,7 +551,6 @@ class DatabaseOperation:
         )
 
     # Query one machine's sensor readings with basic filters.
-    # 使用基础筛选条件查询一台机器的传感器读数。
     def list_sensor_readings(self, database_session: Session, machine_id: str, start_time: datetime | None, end_time: datetime | None, operation_state: OperationState | None, limit: int) -> list[SensorReadingResponse] | None:
         if database_session.get(MachineRecord, machine_id) is None:
             return None
@@ -579,7 +585,6 @@ class DatabaseOperation:
         return reading_results
 
     # Query immutable data events across all machines or one selected machine.
-    # 查询所有机器或指定机器的不可变数据事件。
     def list_data_events(self, database_session: Session, machine_id: str | None, event_code: str | None, limit: int) -> list[DataEventResponse] | None:
         if machine_id is not None and database_session.get(MachineRecord, machine_id) is None:
             return None
@@ -611,7 +616,6 @@ class DatabaseOperation:
         return data_event_results
 
     # Query one fault and the persisted machine history immediately preceding it.
-    # 查询一条故障及其发生前已保存的机器历史。
     def get_fault_context(self, database_session: Session, fault_event_id: int, minutes: int) -> FaultContextResponse | None:
         fault_record = database_session.get(FaultEventRecord, fault_event_id)
         if fault_record is None:
@@ -720,7 +724,6 @@ class DatabaseOperation:
         )
 
     # Query fault context by the machine and device error IDs used by an error report.
-    # 使用错误报告中的机器编号和设备错误编号查询故障上下文。
     def get_fault_context_by_error_id(self, database_session: Session, machine_id: str, error_id: str, minutes: int) -> FaultContextResponse | None:
         fault_event_id = database_session.scalar(
             select(FaultEventRecord.fault_event_id).where(
@@ -733,7 +736,6 @@ class DatabaseOperation:
         return self.get_fault_context(database_session, fault_event_id, minutes)
 
     # Query fault events across all machines or one selected machine.
-    # 查询所有机器或指定机器的故障事件。
     def list_fault_events(self, database_session: Session, machine_id: str | None, is_active: bool | None, is_acknowledged: bool | None, limit: int) -> list[FaultEventResponse] | None:
         if machine_id is not None and database_session.get(MachineRecord, machine_id) is None:
             return None

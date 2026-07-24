@@ -1,5 +1,4 @@
 # Verify the SQLite database scaffold and its five core tables.
-# 验证 SQLite 数据库骨架及其五张核心表。
 
 from sqlalchemy import create_engine, inspect
 

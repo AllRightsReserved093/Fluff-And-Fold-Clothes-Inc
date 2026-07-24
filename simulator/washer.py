@@ -1,11 +1,11 @@
 # Simulate a washer's normal workflow and sensor reports.
-# 模拟洗衣机的正常工作流程与传感器报告。
 
 from datetime import UTC, datetime
 
 import httpx
 
 from laundry_contracts.contracts import MachineType, OperationState, WasherChangeOfStateReport, WasherCyclePhase, WasherPeriodicReport
+from simulator.faults import FaultState, WasherFault, create_washer_fault
 from simulator.machine import COMPLETE_DURATION_SECONDS, IDLE_DURATION_SECONDS, Machine
 
 
@@ -23,20 +23,42 @@ WASHER_PHASE_DURATIONS = {
 }
 
 
+# Simulate washer cycles, readings, reports, and injected faults.
 class Washer(Machine):
+    # Initialize washer-specific sensor values.
     def __init__(self, machine_id: str, http_client: httpx.Client, api_base_url: str) -> None:
         super().__init__(machine_id, MachineType.WASHER, http_client, api_base_url)
-        self.water_level = 0.0
-        self.water_temperature = 20.0
+        self.active_fault: WasherFault | None = None
+        self.water_level: float = 0.0
+        self.water_temperature: float = 20.0
 
-    # Keep a safe placeholder until washer fault simulation is implemented.
-    # 在洗衣机故障模拟实现前，保留一个安全的占位入口。
+    # Activate one supported washer fault when its preconditions are met.
     def inject_fault(self, fault_name: str) -> bool:
-        print(f"[{self.machine_id}] Fault {fault_name} is not supported")
-        return False
+        fault = create_washer_fault(fault_name)
+        if fault is None:
+            print(f"[{self.machine_id}] Fault {fault_name} is not supported")
+            return False
+        if self.active_fault is not None:
+            print(f"[{self.machine_id}] A fault is already active")
+            return False
+        if not fault.can_inject(self.operation_state, self.cycle_stage):
+            print(f"[{self.machine_id}] {fault.injection_error_message}")
+            return False
 
+        self.active_fault = fault
+        print(f"[{self.machine_id}] Injected fault: {fault_name}")
+        return True
+
+    # Advance the washer workflow or its active fault.
     def tick(self, elapsed_seconds: float) -> None:
         if not self.is_registered:
+            return
+
+        # Keep normal stages moving until the armed fault reaches spinning.
+        if self.active_fault is not None and self.cycle_stage is WasherCyclePhase.SPINNING:
+            self.vibration, fault_state = self.active_fault.tick(self.vibration, elapsed_seconds)
+            if fault_state is FaultState.REPAIRED:
+                self._resolve_active_fault()
             return
 
         # IDLE
@@ -72,6 +94,7 @@ class Washer(Machine):
             # Move to the next phase
             self._transition(OperationState.RUNNING, WASHER_STAGES[stage_index + 1], "Automatic cycle stage advanced")
 
+    # Update normal washer sensor values for the current cycle phase.
     def _update_readings(self, elapsed_seconds: float) -> None:
         if self.cycle_stage is WasherCyclePhase.FILLING:
             self.water_level = min(60.0, self.water_level + 3.0 * elapsed_seconds)
@@ -86,6 +109,7 @@ class Washer(Machine):
             self.water_level = 0.0
             self.water_temperature = 25.0
 
+    # Apply and report one washer state transition.
     def _transition(self, new_operation_state: OperationState, new_cycle_stage: WasherCyclePhase | None, reason: str) -> None:
         previous_operation_state = self.operation_state
         previous_cycle_stage = self.cycle_stage
@@ -124,6 +148,16 @@ class Washer(Machine):
 
         self.post("/reports/change-of-state", report, {200})
 
+    # Clear the simulated condition and immediately report normal readings.
+    def _resolve_active_fault(self) -> None:
+        if self.active_fault is None:
+            return
+
+        self.active_fault = None
+        self.send_periodic_report()
+        print(f"[{self.machine_id}] Repair completed")
+
+    # Send the washer's current state and readings to the backend.
     def send_periodic_report(self) -> bool:
         report = WasherPeriodicReport(
             machine_id=self.machine_id,
@@ -137,6 +171,9 @@ class Washer(Machine):
         )
         return self.post("/reports/periodic", report, {200})
 
+    # Return a compact washer status for the simulator console.
     def status_line(self) -> str:
         stage = self.cycle_stage.value if self.cycle_stage is not None else "none"
-        return f"{self.machine_id}: state={self.operation_state.value}, stage={stage}, water={self.water_level:.1f}%, temperature={self.water_temperature:.1f}C, vibration={self.vibration:.1f}"
+        fault = f", fault={self.active_fault.name}" if self.active_fault is not None else ""
+        signals = "on" if self.is_communication_enabled else "off"
+        return f"{self.machine_id}: state={self.operation_state.value}, stage={stage}, water={self.water_level:.1f}%, temperature={self.water_temperature:.1f}C, vibration={self.vibration:.1f}, signals={signals}{fault}"

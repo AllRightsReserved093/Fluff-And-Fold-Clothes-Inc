@@ -1,149 +1,268 @@
 # Fluff and Fold Clothes Inc
 
-一个面向洗衣店本地办公室电脑的设备监控后端原型。系统使用 FastAPI 接收洗衣机和烘干机报告，使用 SQLite 保存当前状态与历史数据，并通过心跳监控和传感器规则发现、确认和解除设备故障。
+A backend prototype for monitoring washers and dryers from an on-premises laundromat office computer. FastAPI receives machine reports, SQLite stores current snapshots and historical records, and heartbeat monitoring and sensor rules surface, acknowledge, and resolve machine faults.
 
-原始任务说明见 [project_prompt.md](project_prompt.md)。原始任务不要求图形界面；当前项目提供完整 REST API、Swagger 文档、设备模拟器控制台和自动刷新的操作员终端前端。
+The original assignment did not require a user interface. This project implements device-ingestion and query APIs, a machine simulator console, and an automatically refreshing operator terminal.
 
-## 当前功能
+## Technology Stack
 
-- 注册、重新启用和注销洗衣机与烘干机
-- 接收周期报告、状态变化报告、设备故障报告和故障解除报告
-- 使用 Pydantic 校验机型分支、传感器结构、枚举、数值范围和带时区时间
-- 使用 `report_id` 识别重复报告，重复请求返回成功但不重复产生副作用
-- 使用 SQLite 保存机器快照、传感器读数、状态事件和故障生命周期
-- 设备超过16秒没有报告时标记离线并记录心跳故障
-- 设备重新发送有效报告后恢复在线并解除心跳故障
-- 根据周期报告和故障解除报告分析或解除传感器故障
-- 查询机器当前状态、内存中的最新读数、历史读数和故障事件
-- 支持操作员确认故障和手动解除故障
-- 首次接收设备故障报告时自动保存故障前5分钟的 JSON 历史快照
-- 使用命令式 ASCII 操作员前端自动刷新机器状态、最新读数和活动故障
-- 使用一个后台模拟线程顺序模拟20台洗衣机和16台烘干机
-- 支持烘干机出风口堵塞、保护停机和维修恢复流程
-- FastAPI 关闭时主动停止并等待心跳监控线程
+| Category | Technology | Purpose |
+|---|---|---|
+| Runtime | Python 3.11+ | Backend, simulator, operator console, and tests |
+| Web API | FastAPI, Uvicorn | REST endpoints, routing, application lifecycle, and ASGI hosting |
+| Data contracts | Pydantic, pydantic-settings | Request and response validation, shared contract models, and environment configuration |
+| Persistence | SQLite, SQLAlchemy 2 | Local storage, ORM models, transactions, and queries |
+| HTTP client | HTTPX | Simulator, operator console, and API test communication |
+| Terminal UI | Textual | Automatically refreshing command-driven ASCII operator interface |
+| Concurrency and scheduling | `threading`, `Condition`, `heapq`, `Queue` | Heartbeat monitoring, simulation loop, and console command delivery |
+| Testing | pytest | Unit, database, API integration, and simulator tests |
 
-## 系统结构
+See [requirements.txt](requirements.txt) for pinned direct dependency versions.
 
-```text
-洗衣机、烘干机或模拟器
-        │ HTTP POST
-        ▼
-FastAPI Routes
-        │ Pydantic结构校验
-        ▼
-MachineService
-   ├── Machine                  内存中的当前运行状态
-   ├── MachineMonitor           心跳截止时间与离线通知
-   ├── sensor_fault_analyzer    传感器规则判断
-   └── DatabaseOperation        SQLAlchemy数据库操作
-                │
-                ▼
-              SQLite
-                ▲
-                │ HTTP GET / POST
-      Textual操作员前端或Swagger
+## Current Features
+
+### Backend
+
+- Exposes device-ingestion, current-state, history, and fault-management REST endpoints under `/api/v1`
+- Registers, reactivates, and deregisters washers and dryers while retaining existing historical records
+- Accepts periodic, state-change, device-error, and error-resolution reports
+- Uses Pydantic to validate machine-specific report branches, sensor structures, enums, numeric ranges, and timezone-aware timestamps
+- Uses `report_id` for idempotency and prevents older device timestamps from rolling back the current snapshot
+- Maintains current machine state, online status, latest readings, and active faults in memory while persisting snapshots and history in SQLite
+- Restores registered machines, latest readings, and active faults from SQLite at startup and stops the heartbeat thread during shutdown
+- Marks a machine offline and records `S8001` after 16 seconds without an accepted report, then restores it automatically after valid contact
+- Evaluates periodic and error-resolution readings for sensor anomalies, including fault creation, deduplication, and automatic resolution
+- Stores and queries sensor readings, machine-state events, data-consistency events, and fault raise, acknowledgement, and resolution records
+- Supports operator acknowledgement, manual fault resolution, and device-reported fault resolution
+- Attempts to save a five-minute pre-fault JSON history snapshot when the first device `ErrorReport` is accepted
+
+### Simulator
+
+- Normal simulation
+  - Sequentially simulates 20 washers and 16 dryers in one background thread and staggers their registrations
+  - Runs machine-specific cycle stages automatically and sends a periodic report every 15 seconds per machine
+  - Sends state-change reports on stage transitions and deregisters registered machines during shutdown
+
+- Manual control and fault injection
+  - Uses `list`, `select`, and `status` to inspect and choose a machine
+  - Supports washer `unbalanced-load`, which raises vibration and pauses stage progress during spinning
+  - Supports dryer `blocked-vent`, which lowers airflow, raises temperature, and eventually triggers an overtemperature protective shutdown
+  - Uses `repair` to restore readings; dryers send an error-resolution report, while washers resume after reporting normal readings
+  - Uses the `offline` and `online` communication backdoors to demonstrate heartbeat timeout and recovery
+
+### Operator Console
+
+- Provides a command-driven Textual ASCII interface that refreshes through the REST API every two seconds
+- Shows backend connectivity, registration and online state, cycle stage, latest readings, and active-fault count on the dashboard
+- Shows active faults, resolved faults, and immutable data events in the diagnostics view
+- Retrieves fault details and the preceding five minutes of sensor, state, and data-event history by database fault ID
+- Supports command-based fault acknowledgement and manual resolution
+- Accesses all data through FastAPI rather than directly reading `MachineService` state or SQLite
+
+## Operator Fault-Diagnosis Workflow
+
+The operator console demonstrates a diagnosis workflow from fault discovery through confirmed recovery:
+
+| Step | Action | Information or result |
+|---|---|---|
+| 1. Discover an anomaly | Watch the automatically refreshed dashboard | Offline machines, operation state, cycle stage, latest sensor readings, active-fault count, and each active fault's `Fault ID`, code, and source |
+| 2. Open diagnostics | Enter `diagnostics` | Up to 100 records per category for active faults, resolved faults, and data-consistency events, including kind, severity, acknowledgement state, and event time |
+| 3. Interpret the code | Look up the code in [fault_codes.md](laundry_contracts/docs/fault_codes.md) | Fault kind, detection authority, equipment action, latching, acknowledgement or reset requirements, and suggested operator action |
+| 4. Inspect context | Enter `fault <fault_id>` | Fault details and the preceding five minutes of sensor readings, state changes, and data events |
+| 5. Acknowledge the fault | Enter `ack <fault_id>` | Marks the active fault as seen without resolving it or changing machine operation |
+| 6. Address the cause | Inspect the machine, communication path, or data quality | Distinguishes device faults, server analytics warnings, heartbeat communication loss, and data-consistency events |
+| 7. Confirm recovery | Wait for a device resolution report or enter `resolve <fault_id>` | Retains fault history, records the resolution time, and allows the operator to verify current online state, operation state, and readings |
+
+The console's `fault_id` is the database `fault_event_id` shown in the first fault-list column. It is not the device-provided string `error_id`.
+
+Diagnostic sources:
+
+- `device`: a device-reported fault or protective shutdown; inspect the code, fault-time readings, and repair result
+- `analytics`: an anomaly derived from periodic readings; inspect the trend and whether later normal readings resolve the warning
+- `heartbeat_monitor`: no accepted report for more than 16 seconds; inspect machine power, networking, and the reporting process
+- `data_events`: immutable audit records for report gaps or state-sequence mismatches; these do not necessarily indicate a physical machine fault
+
+For a device `ErrorReport`, the backend also attempts to write the preceding five minutes of persisted history to `fault_snapshots/fault-<fault_id>.json`. A successfully generated snapshot can be inspected offline even when the operator console is not running. Analytics warnings, heartbeat faults, and data events do not create JSON snapshots, but they remain queryable in SQLite through the diagnostics APIs.
+
+## System Structure
+
+The system has three separately running components: the operator console, FastAPI backend, and device simulator. The console and simulator communicate with the backend only through REST APIs and do not share backend memory or SQLite connections. The backend is a single-process modular monolith divided into API, service coordination, runtime state, monitoring and analytics, and persistence layers.
+
+### Backend Architecture
+
+```mermaid
+flowchart TB
+    Simulator["Device Simulator<br/>simulator/"] -->|"Registration and Device Reports<br/>HTTP POST"| App
+    Frontend["Operator Console / API Client<br/>operator_console/"] -->|"Queries and Fault Actions<br/>HTTP GET / POST"| App
+
+    subgraph Backend["FastAPI Backend Process"]
+        direction TB
+
+        App["Application Entry and Lifespan<br/>app/main.py"]
+
+        subgraph API["API Layer"]
+            Router["Versioned Aggregate Router<br/>app/api/router.py<br/>/api/v1"]
+            DeviceRoutes["Device Intake Routes<br/>register.py, reports.py"]
+            QueryRoutes["Operator Routes<br/>machines.py, readings.py<br/>faults.py, data_events.py"]
+            Contracts["Pydantic Data Contracts<br/>laundry_contracts/contracts.py"]
+        end
+
+        subgraph ServiceLayer["Service Layer"]
+            Service["MachineService<br/>Registration, Reports, Faults,<br/>Queries, and Locking"]
+            Analyzer["sensor_fault_analyzer<br/>Pure Sensor Rule Evaluation"]
+            Snapshot["fault_snapshot<br/>Five-Minute Pre-Fault History Export"]
+        end
+
+        subgraph Runtime["In-Process Runtime State"]
+            Registry["machines_registry<br/>Current Machine Registry"]
+            Machine["Machine<br/>Online Status, Operating Phase,<br/>Latest Readings, and Active Faults"]
+            Monitor["MachineMonitor Thread<br/>Condition + Min-Heap<br/>16-Second Heartbeat Deadline"]
+        end
+
+        subgraph Persistence["Persistence Layer"]
+            Operations["DatabaseOperation<br/>Transactional ORM Writes and Queries"]
+            Sessions["SQLAlchemy Engine / SessionFactory<br/>Connection and Transaction Boundaries"]
+        end
+
+        App --> Router
+        Router --> DeviceRoutes
+        Router --> QueryRoutes
+        Contracts -.->|"Request Validation and<br/>Response Serialization"| DeviceRoutes
+        Contracts -.->|"Query Parameters and<br/>Response Models"| QueryRoutes
+        DeviceRoutes --> Service
+        QueryRoutes --> Service
+
+        Service --> Analyzer
+        Service --> Snapshot
+        Service <--> Registry
+        Registry --> Machine
+        Service -->|"Register, Refresh,<br/>Remove, and Shutdown"| Monitor
+        Monitor -->|"Timeout Callback"| Service
+
+        Service -->|"Open Transaction or<br/>Read Session"| Sessions
+        Service --> Operations
+        Operations -->|"Execute ORM via Session"| Sessions
+
+        App -.->|"Startup: Create Tables and Restore State<br/>Shutdown: Stop and Join Monitor"| Service
+        App -.->|"initialize_database"| Sessions
+    end
+
+    Sessions <--> SQLite[("SQLite<br/>Five Business Tables")]
+    Snapshot --> SnapshotFiles[("fault_snapshots/<br/>JSON History Snapshots")]
 ```
 
-设备报告的处理顺序为：
+Device reports follow this path:
 
 ```text
-JSON请求
-→ Pydantic结构校验
-→ Service检查注册状态
-→ SQLite事务写入
-→ 更新内存状态和心跳截止时间
-→ 返回接收结果
+JSON request
+→ Pydantic validation
+→ Service registration check
+→ SQLite transaction
+→ In-memory state and heartbeat update
+→ HTTP result
 ```
 
-`MachineService` 持有业务流程和互斥锁；`MachineMonitor` 只负责心跳调度；`sensor_fault_analyzer` 只负责纯规则判断；`DatabaseOperation` 只负责持久化和查询。
+Layer responsibilities:
 
-## 项目结构
+- `app/main.py` creates the application and owns its lifecycle. Startup creates missing tables and restores registered machines, latest readings, and active faults; shutdown stops and joins the heartbeat thread.
+- API routes handle HTTP, Pydantic parameters, and status-code mapping. Business state is delegated to the shared `MachineService`.
+- `MachineService` coordinates backend workflows and protects the in-memory registry and report handlers with a mutex. Report transactions commit before memory and heartbeat state are updated, preventing a failed database write from leaving an accepted in-memory state.
+- `Machine` represents current in-process state. Machine lists, individual status, and latest readings come from memory; historical readings, faults, data events, and fault context come from SQLite through `DatabaseOperation`.
+- `MachineMonitor` is the backend's single application-managed monitoring thread. It uses monotonic milliseconds, a `Condition`, and a min-heap to wait for the next heartbeat deadline, then delegates timeout handling to `MachineService`.
+- `sensor_fault_analyzer` is a side-effect-free rule evaluator. `fault_snapshot` writes an already-queried fault context to JSON.
+- `SessionFactory` defines transaction and query session boundaries. `DatabaseOperation` centralizes ORM access to the five business tables, and routes do not access the database directly.
+
+## Project Layout
 
 ```text
 app/
 ├── api/
 │   ├── routes/
-│   │   ├── health.py           # 健康检查
-│   │   ├── register.py         # 注册与注销
-│   │   ├── reports.py          # 四类设备报告
-│   │   ├── machines.py         # 当前机器状态查询
-│   │   ├── readings.py         # 历史读数查询
-│   │   ├── data_events.py      # 数据事件查询
-│   │   └── faults.py           # 故障查询、确认与手动解除
-│   └── router.py               # 集中注册API路由
+│   │   ├── health.py            # Health endpoint
+│   │   ├── register.py          # Registration and deregistration
+│   │   ├── reports.py           # Four device report types
+│   │   ├── machines.py          # Current machine-state queries
+│   │   ├── readings.py          # Historical reading queries
+│   │   ├── data_events.py       # Data-event queries
+│   │   └── faults.py            # Fault queries, acknowledgement, and manual resolution
+│   └── router.py                # Versioned route aggregation
 ├── core/
-│   └── config.py               # 环境变量与应用配置
+│   └── config.py                # Environment and application settings
 ├── database/
-│   ├── base.py                 # SQLAlchemy声明基类
-│   ├── models.py               # SQLite表模型
-│   ├── operation.py            # 数据库读写与查询
-│   └── session.py              # Engine、SessionFactory与建表入口
+│   ├── base.py                  # SQLAlchemy declarative base
+│   ├── models.py                # SQLite ORM models
+│   ├── operation.py             # Database writes and queries
+│   └── session.py               # Engine, SessionFactory, and schema initialization
 ├── machines/
-│   ├── machines.py             # 内存机器状态
-│   └── machine_monitor.py      # 心跳监控线程
+│   ├── machines.py              # In-memory machine state
+│   └── machine_monitor.py       # Heartbeat monitor thread
 ├── services/
-│   ├── machine_service.py      # 业务流程协调
-│   ├── fault_snapshot.py       # 故障历史快照文件
-│   └── sensor_fault_analyzer.py # 传感器故障规则
-└── main.py                     # FastAPI入口与应用生命周期
+│   ├── machine_service.py       # Business workflow coordination
+│   ├── fault_snapshot.py        # Fault-history JSON snapshots
+│   └── sensor_fault_analyzer.py # Sensor fault rules
+└── main.py                      # FastAPI entry point and lifespan
 laundry_contracts/
-└── contracts.py                # 请求、响应、枚举和校验模型
+└── contracts.py                 # Request, response, enum, and validation models
 simulator/
-├── main.py                     # 模拟循环与控制台
-├── machine.py                  # 设备公共行为
-├── washer.py                   # 洗衣机工作流程
-├── dryer.py                    # 烘干机工作流程
-└── faults.py                   # 模拟故障行为
+├── main.py                      # Simulation loop and console
+├── machine.py                   # Shared device behavior
+├── washer.py                    # Washer workflow
+├── dryer.py                     # Dryer workflow
+└── faults.py                    # Simulated fault behavior
 operator_console/
-├── main.py                     # 命令输入、自动刷新与应用生命周期
-├── api_client.py               # 异步前端API客户端
-└── views.py                    # ASCII表格与视图文本生成
-tests/                          # Contracts、API、数据库、服务、心跳和模拟器测试
+├── main.py                      # Command input, refresh loop, and application lifecycle
+├── api_client.py                # Asynchronous operator API client
+└── views.py                     # ASCII tables and view rendering
+scripts/
+└── load_smoke.py                # Concurrent smoke load against a real Uvicorn process
+tests/
+├── test_api_integration.py      # FastAPI, service, and SQLite integration test
+└── ...                          # Contract, database, heartbeat, simulator, and console tests
 ```
 
-## 数据契约
+## Data Contracts
 
-所有设备报告都包含以下公共字段：
+Every device report includes these common fields:
 
-| 字段 | 说明 |
+| Field | Meaning |
 |---|---|
-| `machine_id` | 设备标识 |
-| `machine_type` | `washer` 或 `dryer` |
-| `report_id` | 当前报告的幂等标识 |
-| `recorded_at` | 设备记录事件的带时区时间，进入系统后归一化为 UTC |
+| `machine_id` | Machine identifier |
+| `machine_type` | `washer` or `dryer` |
+| `report_id` | Idempotency identifier for the report |
+| `recorded_at` | Timezone-aware device event time, normalized to UTC when accepted |
 
-`machine_type` 是 Pydantic 判别字段。洗衣机报告必须携带洗衣机读数，烘干机报告必须携带烘干机读数。
+`machine_type` is Pydantic's discriminator field. Washer reports must contain washer readings, and dryer reports must contain dryer readings.
 
-### 传感器读数
+### Sensor Readings
 
-| 类型 | 字段 |
+| Category | Fields |
 |---|---|
-| 公共读数 | `vibration`、`door_locked` |
-| 洗衣机读数 | `water_level`、`water_temperature` |
-| 烘干机读数 | `air_temperature`、`air_flow_speed`、`moisture` |
+| General | `vibration`, `door_locked` |
+| Washer-specific | `water_level`, `water_temperature` |
+| Dryer-specific | `air_temperature`, `air_flow_speed`, `moisture` |
 
-### 报告类型
+### Report Types
 
-| 报告 | 内容 | 后端处理 |
+| Report | Content | Backend handling |
 |---|---|---|
-| `PeriodicReport` | 当前状态、阶段和完整读数 | 保存读数、更新当前快照、分析传感器故障 |
-| `ChangeOfStateReport` | 前后状态、前后阶段和原因 | 保存状态历史并更新当前快照 |
-| `ErrorReport` | 故障信息、故障时读数和可选状态变化 | 保存读数与故障，必要时同时保存状态变化 |
-| `ErrorResolutionReport` | `error_id`、恢复说明、当前状态和恢复后读数 | 保存恢复读数、解除设备故障并重新分析传感器故障 |
+| `PeriodicReport` | Current operation state, cycle stage, and defined sensor readings | Stores a reading, updates the current snapshot, and evaluates sensor rules |
+| `ChangeOfStateReport` | Previous and new operation states, stages, and reason | Stores state history and updates the current snapshot |
+| `ErrorReport` | Fault details, fault-time readings, and an optional state change | Stores the reading and fault, and stores the state change when included |
+| `ErrorResolutionReport` | `error_id`, resolution message, current state, and recovered readings | Stores recovered readings, resolves the device fault, and reevaluates sensor rules |
 
-## 重复报告
+## Duplicate Reports
 
-四类设备报告都使用 `machine_id + report_id` 检查当前报告类型是否已经处理。
+All four device report types use `machine_id + report_id` to determine whether that report type has already been processed. Device error reports also use `machine_id + error_id` so the same fault instance cannot be raised twice under different report IDs.
 
-| 结果 | API行为 |
+| Result | API behavior |
 |---|---|
-| 首次收到 | 返回 HTTP `200`，`is_duplicate=false` |
-| 相同报告再次到达 | 返回 HTTP `200`，`is_duplicate=true` |
-| 机器或目标故障不存在 | 返回 HTTP `404` |
+| First receipt | HTTP `200`, `is_duplicate=false` |
+| Same report received again | HTTP `200`, `is_duplicate=true` |
+| Machine or target fault not found | HTTP `404` |
 
-重复报告不会再次写入数据库、修改内存状态、处理故障或刷新心跳截止时间。
+A duplicate report does not write another database row, modify in-memory state, process faults, or refresh the heartbeat deadline. A report with a device timestamp older than the current in-memory snapshot is also returned as a duplicate result so it cannot roll back current state.
 
-示例响应：
+Example response:
 
 ```json
 {
@@ -154,193 +273,351 @@ tests/                          # Contracts、API、数据库、服务、心跳�
 }
 ```
 
-## 数据库
+## Database
 
-默认数据库地址：
+Default database URL:
 
 ```text
 sqlite:///./laundry.db
 ```
 
-SQLite 是嵌入式数据库，不需要单独启动服务。FastAPI 启动时会创建尚不存在的表。
+SQLite is embedded and does not require a separate database service. At startup, FastAPI creates missing tables, restores still-registered machines with their latest readings and active faults, and adds them back to heartbeat monitoring. Restored machines remain offline until they send a new accepted report.
 
-| 表 | 用途 |
+| Table | Purpose |
 |---|---|
-| `machines` | 每台机器的持久化当前快照与注册状态 |
-| `sensor_readings` | 周期、设备故障和故障解除报告中的历史读数 |
-| `machine_state_events` | 状态变化历史和缺失状态报告时的协调记录 |
-| `data_events` | 数据缺失和状态顺序不一致等不可变审计事件 |
-| `fault_events` | 设备、心跳监控和后端分析产生的活动与历史故障 |
+| `machines` | Persistent current snapshot and registration state for each machine |
+| `sensor_readings` | Historical readings from periodic, device-error, and error-resolution reports |
+| `machine_state_events` | State-change history and reconciliation records when a state-change report is missing |
+| `data_events` | Immutable audit events for report gaps and state-sequence mismatches |
+| `fault_events` | Active and historical faults created by devices, heartbeat monitoring, and backend analytics |
 
-数据库同时保存：
+### Database Schema
 
-- `recorded_at`：设备记录事件的时间
-- `received_at`：数据库收到历史记录的时间
-- `last_online`：服务端最后观察到有效联系的时间
+```mermaid
+erDiagram
+    MACHINES ||--o{ SENSOR_READINGS : has
+    MACHINES ||--o{ MACHINE_STATE_EVENTS : has
+    MACHINES ||--o{ DATA_EVENTS : has
+    MACHINES ||--o{ FAULT_EVENTS : has
 
-运行中的 `Machine` 还直接保存最后一份已接受报告的 `recorded_at`，以及最后一份包含传感器数据的 `latest_reading`。机器查询 API 和操作员总览直接返回这份内存读数，不会为了每次界面刷新再查询传感器历史表。状态变化报告只更新最后报告时间，不会覆盖已有的最新传感器读数。
+    MACHINES {
+        string machine_id PK
+        string machine_type
+        boolean is_registered
+        datetime registered_at
+        string operation_state
+        string cycle_stage
+        datetime last_online
+        datetime recorded_at
+    }
 
-注销设备不会删除历史数据。机器当前快照会标记为未注册，已有读数、状态和故障记录继续保留。
+    SENSOR_READINGS {
+        integer reading_id PK
+        string machine_id FK
+        string report_id
+        datetime recorded_at
+        datetime received_at
+        string operation_state
+        string cycle_stage
+        json general_readings
+        json special_readings
+    }
 
-`Base.metadata.create_all()` 只能创建缺失的表，不能升级已有表结构。修改数据库模型后，目前需要重建开发数据库或以后加入迁移工具。
+    MACHINE_STATE_EVENTS {
+        integer state_event_id PK
+        string machine_id FK
+        string report_id
+        string event_source
+        datetime recorded_at
+        datetime received_at
+        string previous_operation_state
+        string new_operation_state
+        string previous_cycle_stage
+        string new_cycle_stage
+        text reason
+    }
 
-## 心跳监控
+    DATA_EVENTS {
+        integer data_event_id PK
+        string machine_id FK
+        string report_id
+        string event_code
+        text event_message
+        json event_details
+        datetime recorded_at
+        datetime received_at
+    }
 
-- 模拟器正常每15秒发送一次周期报告
-- 后端使用16秒超时时间，提供1秒宽限
-- `MachineMonitor` 使用基于单调毫秒时间的最小堆等待下一个截止时间
-- 新报告会更新对应设备的截止时间
-- 超时后设备被标记为离线，并写入 `S8001` 通信状态事件
-- 心跳超时不会强制把设备运行状态改成 `FAULTED`
-- 后续有效报告会恢复设备在线状态并解除活动的心跳故障
-- 重复报告不会刷新心跳
-- FastAPI 关闭时通过 `MachineService.shutdown()` 停止并 `join()` 心跳线程
+    FAULT_EVENTS {
+        integer fault_event_id PK
+        string machine_id FK
+        string report_id
+        string error_id
+        string error_code
+        text error_message
+        string error_source
+        boolean is_acknowledged
+        datetime raised_at
+        datetime resolved_at
+        text resolution_message
+        datetime created_at
+    }
+```
 
-Monitor 在堆为空时仍保持等待，因此注册列表暂时为空不会导致监控线程自行退出。
+`machines.machine_id` is the foreign key referenced by the other four tables. Every SQLite connection enables `PRAGMA foreign_keys=ON`. Deregistration sets `is_registered` to `false` and clears current operation state and stage; the machine row and related history are retained.
 
-## 故障管理
+Nullable fields:
 
-故障来源包括：
+- `machines`: `registered_at`, `operation_state`, `cycle_stage`, `last_online`, `recorded_at`
+- `sensor_readings`: `operation_state`, `cycle_stage`
+- `machine_state_events`: `previous_cycle_stage`, `new_cycle_stage`, `reason`
+- `fault_events`: `report_id`, `error_message`, `resolved_at`, `resolution_message`
 
-| 来源 | 说明 |
+Primary uniqueness rules and query indexes:
+
+| Table | Unique constraint | Query index |
+|---|---|---|
+| `machines` | Primary key `machine_id` | Primary-key index |
+| `sensor_readings` | `(machine_id, report_id)` | `(machine_id, recorded_at)` |
+| `machine_state_events` | `(machine_id, report_id)` | `(machine_id, recorded_at)` |
+| `data_events` | `(machine_id, report_id, event_code)` | `(machine_id, recorded_at)` |
+| `fault_events` | `(machine_id, error_id)` | `(machine_id, resolved_at)`, `(error_code, raised_at)` |
+
+`machine_type`, `operation_state`, `event_source`, and `error_source` use string enums with database check constraints. `general_readings`, `special_readings`, and `event_details` use JSON to retain machine-specific sensor structures and data-event context.
+
+Three timestamps serve different purposes:
+
+- `recorded_at`: device event time
+- `received_at`: time a historical row is received by the database
+- `last_online`: server-observed time of the most recent accepted machine contact
+
+Each running `Machine` also stores the most recent accepted report's `recorded_at` and the most recent sensor-bearing report as `latest_reading`. Machine-status APIs and the operator dashboard read this value from memory instead of querying sensor history on every refresh. A state-change report updates the last report time without replacing the latest sensor reading.
+
+Deregistration does not delete history. The current snapshot is marked unregistered, while existing reading, state, and fault records remain available.
+
+`Base.metadata.create_all()` creates missing tables but does not migrate existing schemas. During development, a model change currently requires recreating the development database or adding a migration tool.
+
+## Heartbeat Monitoring
+
+Machines do not send a separate heartbeat request. An accepted periodic, state-change, device-error, or error-resolution report counts as successful machine contact.
+
+### Time and Scheduling
+
+- The simulator normally sends a periodic report every 15 seconds, while the backend uses a 16-second timeout to provide a one-second grace period.
+- Deadlines use backend `monotonic_ns()` converted to integer milliseconds when a report is accepted. Wall-clock or timezone changes do not alter an already scheduled wait.
+- `recorded_at` is device event time. It rejects older reports and versions timeout tasks, but it does not calculate the 16-second wait.
+- The monitor stores `(deadline_milliseconds, machine_id, recorded_at)` in a min-heap. The heap root is the next machine to check, so the monitor does not scan all machines on a fixed interval.
+- A `Condition` shares the heap's mutex. Waiting releases that lock; registration, report, deregistration, and shutdown operations modify the heap and call `notify()`, causing the monitor to recalculate the nearest deadline.
+
+### Processing Flow
+
+1. A newly registered machine is marked online and scheduled. The first registration starts the single monitor thread.
+2. At backend restart, still-registered machines are restored from SQLite as offline and given a new 16-second deadline. An accepted report returns them online at any time; missing the deadline first records a new `S8001`.
+3. The monitor reads only the heap root. It waits indefinitely when the heap is empty or uses the remaining milliseconds as a timed wait before the next deadline.
+4. Only a report that passes validation and commits its database transaction updates memory and calls `update_machine()` to move the deadline 16 seconds forward.
+5. Duplicate, older, unregistered, or otherwise rejected reports do not refresh the heartbeat.
+6. When a deadline expires, the monitor pops the heap root, releases the heap lock, and invokes `MachineService.handle_heartbeat_timeout()`.
+7. The service compares the task's `recorded_at` with the machine's current `recorded_at`. A mismatch means the task is stale, so it is ignored instead of overwriting newer contact state.
+8. A valid timeout first writes `S8001 device_communication_lost` to `fault_events`. Only after that succeeds is the in-memory machine marked offline and given the active fault. Its existing `operation_state` and `cycle_stage` are not changed to `FAULTED`.
+9. After a successful timeout, the machine is temporarily absent from the heap, so it does not produce a new communication fault every 16 seconds. A later accepted report resolves active `S8001` records in SQLite and memory, updates `last_online`, marks the machine online, and reinserts its deadline.
+10. Deregistration removes the machine's heap entry. FastAPI shutdown sets `stop_event`, wakes the monitor, and uses `join()` to wait for the thread to exit.
+
+### Time Complexity
+
+Let `n` be the number of monitored machines:
+
+| Operation | Time complexity | Reason |
+|---|---:|---|
+| Register a machine | `O(log n)` | Pushes one deadline onto the min-heap |
+| Read the next deadline | `O(1)` | Reads the heap root |
+| Pop an expired machine | `O(log n)` | Pops the heap root |
+| Refresh a machine deadline | Worst-case `O(n)` | Locates the machine by scanning the current heap, then restores heap order |
+| Deregister a machine | `O(n)` | Locates and removes the entry, then restores heap order |
+| Empty-heap or timed wait | `O(1)` | Blocks with `Condition.wait()` rather than polling |
+
+If the reporting machine is already at the heap root, which is the usual case during normal staggered reporting, refresh avoids a full scan and costs `O(log n)`. The strict worst case remains `O(n)`.
+
+```mermaid
+flowchart TD
+    Register["Register or Restore Machine"] --> Schedule["Schedule Deadline<br/>monotonic now + 16 seconds"]
+    Schedule --> Heap[("Min-Heap<br/>deadline, machine_id, recorded_at")]
+    Heap --> Empty{"Heap Empty?"}
+    Empty -->|Yes| WaitSignal["Condition Wait<br/>Until Notified"]
+    WaitSignal --> Empty
+    Empty -->|No| Due{"Earliest Deadline Reached?"}
+    Due -->|No| TimedWait["Condition Wait<br/>For Remaining Milliseconds"]
+    TimedWait --> Empty
+    Due -->|Yes| Pop["Pop Earliest Task<br/>Release Heap Lock"]
+    Pop --> Callback["Heartbeat Timeout Callback"]
+    Callback --> Version{"recorded_at Still Matches?"}
+    Version -->|No| Ignore["Ignore Stale Timeout"]
+    Version -->|Yes| Persist["Persist S8001 Fault"]
+    Persist --> Offline["Mark Machine Offline<br/>Keep Operating State"]
+
+    Report["Device Report Arrives"] --> Accepted{"Report Accepted?"}
+    Accepted -->|No| NoRefresh["Do Not Refresh Deadline"]
+    Accepted -->|Yes| Commit["Commit Report<br/>Resolve Active S8001"]
+    Commit --> Online["Update Contact<br/>Mark Machine Online"]
+    Online --> Refresh["Refresh or Reinsert Deadline"]
+    Refresh --> Heap
+
+    Callback -.->|Exception| Retry["Log Failure<br/>Reschedule If Needed"]
+    Retry --> Heap
+    Deregister["Deregister Machine"] --> Remove["Remove Heap Entry"]
+    Shutdown["FastAPI Shutdown"] --> Stop["Set Stop Event<br/>Notify and Join Thread"]
+```
+
+The timeout callback runs after the monitor releases the heap lock, so database work does not hold the scheduling lock. `MachineService` uses its own mutex to prevent report and timeout handlers from concurrently mutating machine state. If the timeout callback raises an exception, the monitor logs it and reschedules the machine 16 seconds later when no newer task exists; the monitoring thread remains alive.
+
+## Fault Management
+
+Backend fault sources:
+
+| Source | Meaning |
 |---|---|
-| `device` | 设备主动报告的故障 |
-| `heartbeat_monitor` | 后端检测到的报告超时 |
-| `analytics` | 后端根据状态或传感器读数判断的故障 |
+| `device` | Fault reported directly by a machine |
+| `heartbeat_monitor` | Report timeout detected by the backend |
+| `analytics` | Fault derived by the backend from machine state or sensor readings |
 
-故障的确认和解除是两个不同操作：
+Acknowledgement and resolution are distinct operations:
 
-- 确认 `acknowledge`：表示操作员已经看到故障，不代表问题已经解决
-- 解除 `resolve`：设置解除时间和说明，但保留完整历史记录
+- `acknowledge`: records that the operator has seen the fault; it does not resolve the underlying condition
+- `resolve`: records the resolution time and message while retaining fault history
 
-设备可以通过 `ErrorResolutionReport` 主动解除故障；操作员也可以通过故障管理 API 手动解除。
+A machine can resolve a fault with `ErrorResolutionReport`. An operator can also resolve a fault manually through the fault-management API.
 
-### 故障历史快照
+### Fault-History Snapshots
 
-后端首次接受设备 `ErrorReport` 后，会立即把当时已经保存的故障前5分钟历史写入：
+After accepting the first device `ErrorReport`, the backend attempts to write the preceding five minutes of already-persisted history to:
 
 ```text
 fault_snapshots/fault-<fault_event_id>.json
 ```
 
-文件包含故障记录、传感器读数、状态事件和数据事件，使用 UTF-8 JSON，可以直接用文本编辑器查看。文件名只使用数据库生成的数字故障编号；重复错误报告不会重复生成快照。`fault_snapshots/` 是运行时数据目录，不提交到 Git。
+The UTF-8 JSON file contains the fault record, sensor readings, state events, and data events. Its filename uses only the database-generated numeric fault ID, and duplicate error reports do not generate another snapshot. A file-write failure is logged but does not roll back the accepted fault report. `fault_snapshots/` is runtime data and is not committed to Git.
 
-当前自动文件快照只由设备 `ErrorReport` 触发。服务器分析警告、心跳异常和数据事件仍保存在 SQLite 中，并可以通过诊断接口查询。
+Only a device `ErrorReport` triggers this automatic file snapshot. Analytics warnings, heartbeat faults, and data events remain queryable in SQLite but do not create snapshot files.
 
-### 自动传感器规则
+### Automatic Sensor Rules
 
-周期报告和故障解除报告会调用 `sensor_fault_analyzer.py`。当前原型规则如下：
+Periodic and error-resolution reports invoke `sensor_fault_analyzer.py`. The prototype evaluates these rules:
 
-| 故障代码 | 触发条件 |
+| Diagnostic code | Trigger |
 |---|---|
-| `W1001` | 振动大于 `10.0 m/s²` |
-| `W2101` | 洗衣机水温大于 `80°C` |
-| `W3101` | 烘干机气温大于 `90°C` |
-| `W3201` | 烘干机运行时气流低于 `0.5 m/s` |
+| `W1001` | Vibration greater than `10.0 m/s²` |
+| `W2101` | Washer water temperature greater than `80°C` |
+| `W3101` | Dryer air temperature greater than `90°C` |
+| `W3201` | Dryer airflow lower than `0.5 m/s` while running |
 
-同一种分析故障持续存在时不会每15秒重复创建记录。读数恢复正常后，活动故障自动解除，但历史记录继续保留。
+A continuously active analytics condition does not create another record every 15 seconds. When readings return to normal, the active analytics fault is resolved while its historical row remains.
 
-运行期间门锁丢失属于设备本地保护，不由服务器传感器分析器生成故障。模拟器注入出风口堵塞后达到保护温度时，由模拟设备发送 `F3102` 过温保护停机报告。
+Loss of the door interlock during operation is treated as local device protection rather than a server-generated analytics fault. When the simulator's blocked vent reaches the protective temperature, the simulated device sends an `F3102` overtemperature-trip report.
 
-这些阈值只用于原型演示，正式使用前必须替换为设备制造商提供的实际范围。
+These thresholds are demonstration values. A real deployment would replace them with limits supplied by the equipment manufacturer.
 
 ## API
 
-所有业务路由默认使用 `/api/v1` 前缀。
+Business routes use `/api/v1` by default.
 
-### 系统状态
+### System Status
 
-| 方法 | 路径 | 用途 |
+| Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/v1/health` | 健康检查 |
+| `GET` | `/api/v1/health` | Health check |
 
-### 机器管理与查询
+### Machine Management and Queries
 
-| 方法 | 路径 | 用途 |
+| Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/v1/machines/register` | 注册新机器或重新启用历史机器 |
-| `POST` | `/api/v1/machines/deregister` | 注销机器但保留历史 |
-| `GET` | `/api/v1/machines` | 查询全部机器状态 |
-| `GET` | `/api/v1/machines/{machine_id}` | 查询一台机器状态 |
+| `POST` | `/api/v1/machines/register` | Register a new machine or reactivate a historical machine |
+| `POST` | `/api/v1/machines/deregister` | Deregister a machine while retaining history |
+| `GET` | `/api/v1/machines` | List current machine status |
+| `GET` | `/api/v1/machines/{machine_id}` | Get one machine's current status |
 
-### 设备报告
+### Device Reports
 
-| 方法 | 路径 | 用途 |
+| Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/v1/reports/periodic` | 接收周期状态与传感器报告 |
-| `POST` | `/api/v1/reports/change-of-state` | 接收状态变化报告 |
-| `POST` | `/api/v1/reports/error` | 接收设备故障与故障时读数 |
-| `POST` | `/api/v1/reports/error-resolution` | 接收故障解除与恢复后读数 |
+| `POST` | `/api/v1/reports/periodic` | Accept periodic state and sensor readings |
+| `POST` | `/api/v1/reports/change-of-state` | Accept a state-change report |
+| `POST` | `/api/v1/reports/error` | Accept a device fault and fault-time readings |
+| `POST` | `/api/v1/reports/error-resolution` | Accept fault resolution and recovered readings |
 
-### 读数、数据事件与故障
+### Readings, Data Events, and Faults
 
-| 方法 | 路径 | 用途 |
+| Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/v1/machines/{machine_id}/readings` | 查询机器历史读数 |
-| `GET` | `/api/v1/data-events` | 查询不可变的数据一致性事件 |
-| `GET` | `/api/v1/faults` | 查询全部机器故障 |
-| `GET` | `/api/v1/faults/{fault_event_id}/context` | 查询故障及其发生前的设备历史 |
-| `GET` | `/api/v1/machines/{machine_id}/faults` | 查询一台机器的故障 |
-| `POST` | `/api/v1/machines/{machine_id}/faults/{error_id}/acknowledge` | 确认故障但不解除 |
-| `POST` | `/api/v1/machines/{machine_id}/faults/{error_id}/resolve` | 手动解除故障 |
+| `GET` | `/api/v1/machines/{machine_id}/readings` | Query historical machine readings |
+| `GET` | `/api/v1/data-events` | Query immutable data-consistency events |
+| `GET` | `/api/v1/faults` | Query faults across machines |
+| `GET` | `/api/v1/faults/{fault_event_id}/context` | Query a fault and its preceding machine history |
+| `GET` | `/api/v1/machines/{machine_id}/faults` | Query faults for one machine |
+| `POST` | `/api/v1/machines/{machine_id}/faults/{error_id}/acknowledge` | Acknowledge a fault without resolving it |
+| `POST` | `/api/v1/machines/{machine_id}/faults/{error_id}/resolve` | Resolve a fault manually |
 
-完整请求和响应结构可以在服务启动后通过 Swagger UI 查看：
+Interactive request and response documentation is available from Swagger UI while the service is running:
 
 <http://127.0.0.1:8000/docs>
 
-## 查询示例
+## Query Examples
 
-查询当前机器状态：
+Query current machine state:
 
 ```text
 GET /api/v1/machines
 GET /api/v1/machines/washer-01
 ```
 
-查询一台机器最近20条运行状态读数：
+Query the latest 20 readings recorded while one machine was running:
 
 ```text
 GET /api/v1/machines/washer-01/readings?operation_state=running&limit=20
 ```
 
-读数接口支持：
+The readings endpoint supports:
 
 - `start_time`
 - `end_time`
 - `operation_state`
-- `limit`，范围为1到1000，默认100
+- `limit`, from 1 to 1000, default 100
 
-查询一台机器最近20条状态报告缺失事件：
+Query the latest 20 missing-state-report events for one machine:
 
 ```text
 GET /api/v1/data-events?machine_id=washer-01&event_code=D9001&limit=20
 ```
 
-数据事件接口支持 `machine_id`、`event_code` 和 `limit`。
+The data-event endpoint supports `machine_id`, `event_code`, and `limit`.
 
-查询所有尚未解除且尚未确认的故障：
+Query unresolved and unacknowledged faults:
 
 ```text
 GET /api/v1/faults?active=true&acknowledged=false
 ```
 
-故障接口支持：
+The fault endpoint supports:
 
 - `active`
 - `acknowledged`
-- `limit`，范围为1到1000，默认100
+- `limit`, from 1 to 1000, default 100
 
-查询故障编号1及其发生前5分钟的持久化历史：
+Query fault 1 and its preceding five minutes of persisted history:
 
 ```text
 GET /api/v1/faults/1/context?minutes=5
 ```
 
-该接口返回故障记录，以及时间窗口内的传感器读数、状态事件和数据事件。`minutes` 范围为1到60，默认5。
+The response contains the fault record and sensor readings, state events, and data events within the time window. `minutes` ranges from 1 to 60 and defaults to 5.
 
-## 本地运行
+## Local Development
 
-创建环境并安装依赖：
+Python 3.11 or newer is required.
+
+### Windows PowerShell
+
+Open PowerShell in the repository root. The backend, simulator, and operator console each need a separate terminal.
+
+Create the virtual environment and install dependencies:
 
 ```powershell
 python -m venv .venv
@@ -348,107 +625,175 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-启动 FastAPI：
+Start FastAPI in the first terminal:
 
 ```powershell
+.\.venv\Scripts\Activate.ps1
 python -m uvicorn app.main:app --reload
 ```
 
-启动后可访问：
+Available after startup:
 
-- Swagger API 文档：<http://127.0.0.1:8000/docs>
-- OpenAPI JSON：<http://127.0.0.1:8000/openapi.json>
-- 健康检查：<http://127.0.0.1:8000/api/v1/health>
+- Swagger API documentation: <http://127.0.0.1:8000/docs>
+- OpenAPI JSON: <http://127.0.0.1:8000/openapi.json>
+- Health check: <http://127.0.0.1:8000/api/v1/health>
 
-保持后端运行，在第二个终端启动模拟器：
+Start the simulator in the second terminal:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python -m simulator.main
 ```
 
-在另一个终端启动操作员前端：
+When the backend uses a different host, port, or API prefix, provide the complete simulator API base URL:
+
+```powershell
+python -m simulator.main --api-base-url http://127.0.0.1:8000/api/v2
+```
+
+Start the operator console in the third terminal:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 python -m operator_console.main
 ```
 
-## 模拟器
+If PowerShell blocks `Activate.ps1`, skip activation and replace `python` in the commands above with `.\.venv\Scripts\python.exe`.
 
-模拟器会创建20台洗衣机和16台烘干机，以0.5秒间隔错峰注册。一个后台线程顺序推进全部设备，每台设备每15秒发送周期报告；主线程只处理控制台输入，并通过 `Queue` 把命令交给模拟线程。
+### Five-Minute Demo
 
-正常工作阶段：
+After starting all three programs, wait about 20 seconds for all 36 simulated machines to finish staggered registration.
+
+1. In the simulator terminal, select a dryer and verify that it is `RUNNING` in `HEATING` or `DRYING`:
+
+   ```text
+   select dryer-01
+   status
+   ```
+
+2. Inject a blocked-vent fault:
+
+   ```text
+   fault blocked-vent
+   ```
+
+   The simulator freezes the current stage but continues periodic reporting. Over roughly one to two minutes, airflow falls and temperature rises until the device sends `F3102 dryer_overtemperature_trip` and enters protective shutdown.
+
+3. In the operator console, open the active diagnostics:
+
+   ```text
+   diagnostics
+   ```
+
+   Find the numeric `Fault ID` for `F3102`, then inspect its details and preceding five minutes of history:
+
+   ```text
+   fault <fault_id>
+   ack <fault_id>
+   ```
+
+4. Begin repair from the simulator terminal:
+
+   ```text
+   repair
+   ```
+
+   After the readings recover, the simulator sends an error-resolution report. Run `diagnostics` again in the operator console to inspect the fault's raise, acknowledgement, and resolution information.
+
+5. Demonstrate heartbeat loss from the simulator terminal:
+
+   ```text
+   offline
+   ```
+
+   After more than 16 seconds, the operator console shows the machine offline with `S8001 device_communication_lost`. Restore communication:
+
+   ```text
+   online
+   ```
+
+   The next accepted report marks the machine online and automatically resolves the active `S8001`.
+
+6. When finished, enter `quit` in both the simulator and operator console, then press `Ctrl+C` in the backend terminal. The simulator deregisters its registered machines during shutdown.
+
+## Simulator
+
+The simulator creates 20 washers and 16 dryers and staggers registration by 0.5 seconds. One background thread advances every machine sequentially and sends each machine's periodic report every 15 seconds. The main thread handles console input and sends commands to the simulation thread through a `Queue`.
+
+Normal cycle stages:
 
 ```text
 Washer: FILLING → WASHING → DRAINING → SPINNING → COMPLETE → IDLE
 Dryer:  HEATING → DRYING → COOLING → COMPLETE → IDLE
 ```
 
-控制台命令：
+Console commands:
 
-```text
-list
-select <machine_id>
-status
-fault blocked-vent
-repair
-help
-quit
-```
-
-`blocked-vent` 目前只支持运行在 `HEATING` 或 `DRYING` 阶段的烘干机。注入后：
-
-```text
-冻结当前阶段
-→ 周期报告继续发送
-→ 气流逐渐下降、温度逐渐升高
-→ 达到保护阈值
-→ 发送ErrorReport并进入FAULTED
-```
-
-执行 `repair` 后：
-
-```text
-传感器逐步恢复
-→ 发送包含恢复读数的ErrorResolutionReport
-→ 清除活动故障
-→ 发送FAULTED到IDLE状态报告
-```
-
-Washer 暂时没有可注入故障。对 Washer 执行 `fault` 或 `repair` 只会返回不支持提示，不会终止模拟线程。
-
-执行 `quit` 会停止模拟循环，并逐台注销已经注册的设备。HTTP 请求失败时只打印错误，当前不进行复杂重试、离线缓存或补发。
-
-## 操作员控制台
-
-操作员控制台默认连接 `http://127.0.0.1:8000/api/v1`，每2秒刷新当前视图。前端只通过 FastAPI 操作数据，不直接访问 `MachineService` 或 SQLite。界面使用一个自动刷新的 ASCII 信息区和一个文本命令输入框，不需要方向键选择表格。
-
-控制台命令：
-
-| 命令 | 操作 |
+| Command | Purpose |
 |---|---|
-| `help` | 显示命令说明 |
-| `refresh` | 立即刷新 |
-| `diagnostics` | 查看所有机器的活动故障、已解除故障和数据事件 |
-| `diagnostics machine <machine_id>` | 查看指定机器的诊断信息 |
-| `diagnostics fault <fault_id>` | 查看一条故障及其发生前5分钟的历史 |
-| `dashboard` | 返回机器总览 |
-| `ack <fault_id>` | 按控制台显示的故障编号确认一条活动故障 |
-| `resolve <fault_id> [message]` | 按控制台显示的故障编号手动解除一条故障 |
-| `quit` | 退出前端 |
+| `list` | Show operation state, stage, readings, communication state, and active simulated fault for every machine |
+| `select <machine_id>` | Select the machine used by subsequent commands |
+| `status` | Show detailed status for the selected machine |
+| `fault blocked-vent` | Inject a blocked-vent fault into the selected dryer |
+| `fault unbalanced-load` | Inject an unbalanced-load fault into the selected washer |
+| `repair` | Start repairing the selected machine's active simulated fault |
+| `offline` | Stop reports and freeze the selected machine's local workflow to simulate communication loss |
+| `online` | Restore the selected machine's communication and local workflow |
+| `help` | Show simulator command help |
+| `quit` | Stop the simulator and deregister registered machines |
 
-诊断视图会显示正式故障码的类型和严重程度。旧版故障码显示为 `legacy`，不会阻止其他记录正常显示。
+`blocked-vent` is supported only when a dryer is `RUNNING` in `HEATING` or `DRYING`. After injection:
 
-使用其他后端地址时：
+```text
+Freeze the current stage
+→ Continue periodic reports
+→ Gradually reduce airflow and increase temperature
+→ Reach the protective threshold
+→ Send ErrorReport and enter FAULTED
+```
+
+After `repair`:
+
+```text
+Gradually restore sensor readings
+→ Send ErrorResolutionReport with recovered readings
+→ Clear the active fault
+→ Send the FAULTED-to-IDLE state report
+```
+
+`unbalanced-load` is supported only for a `RUNNING` washer. It can be armed during any running stage, but vibration increases and the stage timer pauses only after the washer enters `SPINNING`. Periodic reports continue, and the backend creates `W1001` after vibration exceeds the threshold. `repair` restores normal vibration, immediately sends a normal periodic reading, and resumes the spinning stage.
+
+`offline` is a simulator-only communication backdoor. It freezes the selected machine's local workflow and stops all reports without deregistering the machine or generating an `ErrorReport`. After the 16-second timeout, the backend creates `S8001` and shows the machine offline. `online` resumes the frozen workflow; because the periodic deadline has passed, the next simulation loop immediately sends the current report and restores backend online status.
+
+`quit` stops the simulation loop and deregisters registered machines. HTTP failures are printed; the prototype does not implement retries, offline buffering, or reliable delivery.
+
+## Operator Console
+
+The operator console connects to `http://127.0.0.1:8000/api/v1` by default and refreshes its current view every two seconds. It uses FastAPI exclusively rather than reading `MachineService` or SQLite directly. The interface has one automatically refreshed ASCII output region and one text command input; table navigation is not required.
+
+Console commands:
+
+| Command | Action |
+|---|---|
+| `help` | Show command help |
+| `diagnostics` | Show active faults, resolved faults, and data events across machines |
+| `fault <fault_id>` | Show one fault and its preceding five minutes of history |
+| `dashboard` | Return to the machine overview |
+| `ack <fault_id>` | Acknowledge an active fault by the ID shown in the console |
+| `resolve <fault_id>` | Manually resolve a fault by the ID shown in the console |
+| `quit` | Exit the operator console |
+
+The diagnostics view resolves fault kind and severity through the diagnostic-code catalog. The current simulator uses only codes defined by the `DiagnosticCode` enum.
+
+To use another backend address:
 
 ```powershell
-python -m operator_console.main --api-base-url http://127.0.0.1:8000/api/v1
+python -m operator_console.main --api-base-url http://127.0.0.1:8000/api/v2
 ```
 
-## 配置
+## Configuration
 
-项目不要求 `.env` 才能启动。默认配置已经能够运行：
+The project starts without an `.env` file because the defaults are runnable:
 
 ```dotenv
 FFC_APP_NAME=Fluff and Fold Clothes Inc API
@@ -458,47 +803,40 @@ FFC_DEBUG=false
 FFC_DATABASE_URL=sqlite:///./laundry.db
 ```
 
-需要覆盖默认值时，可以在项目根目录创建 `.env`。所有环境变量使用 `FFC_` 前缀。
+Create `.env` in the repository root only when overriding defaults. Application environment variables use the `FFC_` prefix.
 
-## 测试
+## Testing
 
-所有测试都使用内存 SQLite 或模拟 HTTP 传输，不会修改项目的 `laundry.db`。
+The pytest suite uses in-memory SQLite or mock HTTP transports and does not modify the repository's `laundry.db`.
 
-运行完整测试集：
+Run the full suite:
 
 ```powershell
 python -m pytest -q -p no:cacheprovider
 ```
 
-当前验证结果：
+Coverage includes:
 
-```text
-61 passed
+- Pydantic contracts and discriminated machine types
+- FastAPI routes and query parameters
+- SQLite schema and primary business lifecycles
+- MachineService and MachineMonitor coordination
+- Monotonic millisecond time and heartbeat deadlines
+- Heartbeat races, callback exceptions, and thread shutdown
+- Sensor-fault creation, deduplication, and automatic resolution
+- Device-fault acknowledgement and resolution
+- Duplicate-report idempotency and protection from older device timestamps
+- Startup restoration from SQLite into memory
+- Simulator workflows, faults, repairs, and deregistration
+- Custom simulator API base URL
+- FastAPI startup and heartbeat-thread shutdown
+- FastAPI, MachineService, and SQLite fault-lifecycle integration
+- Operator API client, ASCII commands, and automatic refresh
+
+Run the concurrent smoke load against a real Uvicorn process:
+
+```powershell
+python scripts/load_smoke.py
 ```
 
-测试覆盖：
-
-- Pydantic Contracts 和机型判别
-- FastAPI 路由和查询参数
-- SQLite 表结构与完整业务生命周期
-- MachineService 与 Monitor 协作
-- 单调毫秒时间和心跳截止时间
-- 传感器故障产生、去重和自动解除
-- 设备故障确认与解除
-- 重复报告幂等响应
-- 模拟器正常流程、故障、维修和注销
-- FastAPI 启动与心跳线程关闭
-- 操作员 API 客户端、ASCII 命令输入和自动刷新
-
-## 当前限制
-
-- 模拟器只实现烘干机 `blocked-vent` 一种可注入故障
-- 操作员前端目前只显示当前状态与活动故障，尚未显示历史读数和已解除故障
-- 应用重启后尚未从 SQLite 恢复内存机器注册表和心跳队列
-- 自动故障阈值是原型值，不是设备制造商规格
-- 尚未加入数据库迁移工具；`create_all()` 不能升级已有表
-- 尚未加入认证和权限控制
-- 当前内存注册表和心跳监控面向单进程部署
-- 自动测试没有启动真实网络服务器执行完整的后端与模拟器端到端流程
-
-这些限制不阻塞原始本地后端作业，但在接入真实设备、多人操作或生产部署前需要重新评估。
+The script uses a temporary SQLite database, registers 36 machines, and concurrently sends 180 periodic reports. It then checks database integrity, foreign keys, duplicate reports, current-snapshot freshness, and suspicious timestamps. The temporary database is deleted after the run, and the repository's `laundry.db` is not modified.

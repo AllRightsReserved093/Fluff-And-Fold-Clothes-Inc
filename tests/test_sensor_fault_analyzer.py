@@ -1,5 +1,4 @@
 # Verify pure periodic sensor fault detection rules.
-# 验证周期传感器故障的纯检测规则。
 
 from datetime import UTC, datetime
 

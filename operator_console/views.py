@@ -1,15 +1,38 @@
 # Build the operator console's plain ASCII views.
-# 生成操作员控制台使用的纯 ASCII 视图。
 
 import json
 from datetime import datetime
 
-from laundry_contracts.contracts import DataEventResponse, DryerSensorReadings, FaultContextResponse, FaultEventResponse, MachineStatusResponse, WasherSensorReadings
+from laundry_contracts.contracts import DataEventResponse, FaultContextResponse, FaultEventResponse, MachineStatusResponse
 from laundry_contracts.fault_codes import DIAGNOSTIC_DEFINITIONS, DiagnosticCode
 
 
+# --------- Diagnostic Helpers ---------
+# Resolve one diagnostic code to its catalog kind and severity.
+def _diagnostic_metadata(code_value: str) -> tuple[str, str]:
+    code = DiagnosticCode(code_value)
+    definition = DIAGNOSTIC_DEFINITIONS[code]
+    return definition.kind.value, definition.severity.value
+
+# Convert a Boolean value into a compact table label.
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"
+
+# --------- Table Formatting ---------
 # Build a plain ASCII table from headers and rows.
-# 根据表头和数据行生成纯 ASCII 表格。
+def _format_time(value: datetime | None) -> str:
+    return value.isoformat(sep=" ", timespec="seconds") if value is not None else "-"
+
+# Format historical sensor values to one decimal place without changing stored data.
+def _format_sensor_readings(readings: dict[str, object]) -> str:
+    formatted_readings = {}
+    for name, value in readings.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = round(value, 1)
+        formatted_readings[name] = value
+    return json.dumps(formatted_readings, ensure_ascii=False, sort_keys=True)
+
+# Build an aligned ASCII table from a title, headers, and rows.
 def build_ascii_table(title: str, headers: tuple[str, ...], rows: list[tuple[str, ...]]) -> str:
     if not rows:
         return f"{title}\n(no data)"
@@ -21,6 +44,7 @@ def build_ascii_table(title: str, headers: tuple[str, ...], rows: list[tuple[str
             column_width = max(column_width, len(row[column_index]))
         widths.append(column_width)
 
+    # Build one padded row using the calculated column widths.
     def build_row(values: tuple[str, ...]) -> str:
         cells = [value.ljust(widths[index]) for index, value in enumerate(values)]
         return "| " + " | ".join(cells) + " |"
@@ -31,9 +55,25 @@ def build_ascii_table(title: str, headers: tuple[str, ...], rows: list[tuple[str
     lines.append(border)
     return "\n".join(lines)
 
+# Format one machine's latest in-memory reading for the dashboard.
+def _format_latest_reading(machine: MachineStatusResponse) -> tuple[str, str]:
+    reading = machine.latest_reading
+    if reading is None:
+        return "-", "-"
 
+    values = reading.general_readings.model_dump()
+    values.update(reading.special_readings.model_dump())
+    formatted_values = []
+    for name, value in values.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = f"{value:.1f}"
+        formatted_values.append(f"{name}={value}")
+    summary = ", ".join(formatted_values)
+
+    return _format_time(reading.recorded_at), summary
+
+# --------- Views ---------
 # Convert the latest machine and fault data into the dashboard view.
-# 将最新机器与故障数据转换成总览视图。
 def build_dashboard_text(machines: list[MachineStatusResponse], faults: list[FaultEventResponse], backend_online: bool, last_refresh_at: datetime | None, status_message: str) -> str:
     registered_count = sum(machine.is_registered for machine in machines)
     online_count = sum(machine.is_registered and machine.is_online for machine in machines)
@@ -77,7 +117,7 @@ def build_dashboard_text(machines: list[MachineStatusResponse], faults: list[Fau
     )
     fault_table = build_ascii_table(
         "ACTIVE FAULTS",
-        ("Fault", "Machine", "Code", "Source", "Ack", "Raised"),
+        ("Fault ID", "Machine", "Code", "Source", "Ack", "Raised"),
         fault_rows,
     )
     summary = (
@@ -90,11 +130,9 @@ def build_dashboard_text(machines: list[MachineStatusResponse], faults: list[Fau
 
 
 # Convert fault history and immutable data events into one diagnostic view.
-# 将故障历史和不可变数据事件转换成统一诊断视图。
-def build_diagnostics_text(faults: list[FaultEventResponse], resolved_faults: list[FaultEventResponse], data_events: list[DataEventResponse], diagnostic_machine_id: str | None, backend_online: bool, last_refresh_at: datetime | None, status_message: str) -> str:
+def build_diagnostics_text(faults: list[FaultEventResponse], resolved_faults: list[FaultEventResponse], data_events: list[DataEventResponse], backend_online: bool, last_refresh_at: datetime | None, status_message: str) -> str:
     backend_status = "ONLINE" if backend_online else "OFFLINE"
     refresh_time = _format_time(last_refresh_at)
-    scope = diagnostic_machine_id or "all machines"
 
     active_fault_rows = []
     for fault in faults:
@@ -145,12 +183,12 @@ def build_diagnostics_text(faults: list[FaultEventResponse], resolved_faults: li
 
     active_fault_table = build_ascii_table(
         "ACTIVE DIAGNOSTICS",
-        ("Fault", "Machine", "Code", "Kind", "Severity", "Ack", "Raised", "Message"),
+        ("Fault ID", "Machine", "Code", "Kind", "Severity", "Ack", "Raised", "Message"),
         active_fault_rows,
     )
     resolved_fault_table = build_ascii_table(
         "RESOLVED DIAGNOSTICS",
-        ("Fault", "Machine", "Code", "Kind", "Severity", "Resolved", "Message"),
+        ("Fault ID", "Machine", "Code", "Kind", "Severity", "Resolved", "Message"),
         resolved_fault_rows,
     )
     data_event_table = build_ascii_table(
@@ -160,7 +198,7 @@ def build_diagnostics_text(faults: list[FaultEventResponse], resolved_faults: li
     )
     summary = (
         f"FLUFF & FOLD DIAGNOSTICS\n"
-        f"Backend: {backend_status} | Scope: {scope} | Active: {len(faults)} | "
+        f"Backend: {backend_status} | Active: {len(faults)} | "
         f"Resolved: {len(resolved_faults)} | Data events: {len(data_events)} | "
         f"Last refresh: {refresh_time}"
     )
@@ -168,7 +206,6 @@ def build_diagnostics_text(faults: list[FaultEventResponse], resolved_faults: li
 
 
 # Convert one fault context response into a readable pre-fault history view.
-# 将一条故障上下文响应转换成易读的故障前历史视图。
 def build_fault_context_text(fault_context: FaultContextResponse | None, context_fault_id: int | None, status_message: str) -> str:
     if fault_context is None:
         return f"FAULT CONTEXT\n\nLoading fault {context_fault_id}...\n\n{status_message}"
@@ -192,8 +229,8 @@ def build_fault_context_text(fault_context: FaultContextResponse | None, context
                 _format_time(reading.recorded_at),
                 reading.operation_state.value if reading.operation_state is not None else "-",
                 reading.cycle_stage or "-",
-                json.dumps(reading.general_readings, ensure_ascii=False, sort_keys=True),
-                json.dumps(reading.special_readings, ensure_ascii=False, sort_keys=True),
+                _format_sensor_readings(reading.general_readings),
+                _format_sensor_readings(reading.special_readings),
             )
         )
 
@@ -239,52 +276,3 @@ def build_fault_context_text(fault_context: FaultContextResponse | None, context
         data_event_rows,
     )
     return f"{fault_summary}\n\n{reading_table}\n\n{state_event_table}\n\n{data_event_table}\n\n{status_message}"
-
-
-# Resolve catalog metadata without rejecting legacy fault records.
-# 解析目录元数据，同时允许显示旧版故障记录。
-def _diagnostic_metadata(code_value: str) -> tuple[str, str]:
-    try:
-        code = DiagnosticCode(code_value)
-    except ValueError:
-        return "legacy", "-"
-
-    definition = DIAGNOSTIC_DEFINITIONS[code]
-    return definition.kind.value, definition.severity.value
-
-
-# Format one machine's latest in-memory reading for the dashboard.
-# 为总览格式化一台机器的最新内存读数。
-def _format_latest_reading(machine: MachineStatusResponse) -> tuple[str, str]:
-    reading = machine.latest_reading
-    if reading is None:
-        return "-", "-"
-
-    general = reading.general_readings
-    door_state = "locked" if general.door_locked else "unlocked"
-
-    if isinstance(reading.special_readings, WasherSensorReadings):
-        special = reading.special_readings
-        summary = (
-            f"vib={general.vibration:.1f}, door={door_state}, "
-            f"water={special.water_level:.1f}%, temp={special.water_temperature:.1f}C"
-        )
-    elif isinstance(reading.special_readings, DryerSensorReadings):
-        special = reading.special_readings
-        summary = (
-            f"vib={general.vibration:.1f}, door={door_state}, "
-            f"air={special.air_temperature:.1f}C, flow={special.air_flow_speed:.1f}m/s, "
-            f"moisture={special.moisture:.1f}%"
-        )
-    else:
-        summary = "-"
-
-    return _format_time(reading.recorded_at), summary
-
-
-def _yes_no(value: bool) -> str:
-    return "yes" if value else "no"
-
-
-def _format_time(value: datetime | None) -> str:
-    return value.isoformat(sep=" ", timespec="seconds") if value is not None else "-"

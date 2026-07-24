@@ -1,5 +1,4 @@
 # Represent the backend state of a registered laundry machine.
-# 表示已注册洗衣设备在后端中的状态。
 
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -18,64 +17,48 @@ from laundry_contracts.contracts import (
 )
 from laundry_contracts.fault_codes import DiagnosticCode
 
+# Represent the mutable in-memory state of one registered machine.
 class Machine:
-
-    machine_id: str
-    machine_type: MachineType
-
-    is_online: bool
-    operation_state: OperationState | None
-    cycle_stage: WasherCyclePhase | DryerCyclePhase | None
-
-    is_error: bool
-    error_list: dict[str, MachineError]
-    
-    is_registered: bool
-    last_online: datetime | None
-    recorded_at: datetime | None
-    latest_reading: LatestSensorReading | None
-
-    def __init__(self, machine_id: str, machine_type: MachineType):
-        self.machine_id = machine_id
-        self.machine_type = machine_type
+    # Initialize one machine with no registration, readings, or active errors.
+    def __init__(self, machine_id: str, machine_type: MachineType) -> None:
+        self.machine_id: str = machine_id
+        self.machine_type: MachineType = machine_type
         
-        self.is_online = False
-        self.operation_state = None
-        self.cycle_stage = None
+        self.is_online: bool = False
+        self.operation_state: OperationState | None = None
+        self.cycle_stage: WasherCyclePhase | DryerCyclePhase | None = None
         
-        self.is_error = False
-        self.error_list = {}
+        self.is_error: bool = False
+        self.error_list: dict[str, MachineError] = {}
 
-        self.is_registered = False
+        self.is_registered: bool = False
+        self.registered_at: datetime | None = None
 
-        self.last_online = None
-        self.recorded_at = None
-        self.latest_reading = None
+        self.last_online: datetime | None = None
+        self.recorded_at: datetime | None = None
+        self.latest_reading: LatestSensorReading | None = None
 
 
 
-    def __str__(self):
+    # Return a compact human-readable machine description.
+    def __str__(self) -> str:
         return f"Machine(id={self.machine_id}, type={self.machine_type}, online={self.is_online})"
 
     # Mark the machine as currently reachable and record the server time.
-    # 将机器标记为当前在线，并记录服务器时间。
     def mark_online(self) -> None:
         self.is_online = True
         self.last_online = datetime.now(UTC)
 
     # Mark the machine as unreachable without discarding its last-seen time.
-    # 将机器标记为离线，同时保留最后在线时间。
     def mark_offline(self) -> None:
         self.is_online = False
 
     # Restore an offline machine and clear only active heartbeat errors.
-    # 恢复离线机器，并且只解除活动的心跳超时错误。
     def recover_online(self) -> None:
         self.mark_online()
         self.resolve_heartbeat_timeout()
 
     # Resolve active heartbeat errors while preserving other machine errors.
-    # 解除活动的心跳超时错误，同时保留机器的其他错误。
     def resolve_heartbeat_timeout(self) -> None:
         resolved_at = datetime.now(UTC)
 
@@ -91,24 +74,28 @@ class Machine:
 
         self.is_error = bool(self.error_list)
     
-    def register(self):
+    # Mark the machine as registered and online.
+    def register(self) -> None:
+        if self.is_registered:
+            return
         self.is_registered = True
         self.mark_online()
+        self.registered_at = datetime.now(UTC)
 
     # Deregister the machine, remove from the machine list
-    def deregister(self):
+    def deregister(self) -> None:
         self.mark_offline()
         self.is_registered = False
         self.operation_state = None
         self.cycle_stage = None
     
 
-    def update_state(self, operation_state: OperationState | None, cycle_stage: WasherCyclePhase | DryerCyclePhase | None):
+    # Replace the machine's current operation state and cycle stage.
+    def update_state(self, operation_state: OperationState | None, cycle_stage: WasherCyclePhase | DryerCyclePhase | None) -> None:
         self.operation_state = operation_state
         self.cycle_stage = cycle_stage
 
     # Store the newest accepted sensor values without querying their persisted history.
-    # 保存最新接受的传感器读数，避免查询其持久化历史。
     def update_latest_reading(
         self,
         recorded_at: datetime,
@@ -121,28 +108,27 @@ class Machine:
             special_readings=special_readings,
         )
 
-    def set_error_heartbeat_timeout(self):
-        # Set an error due to heartbeat timeout
-        self.mark_offline()
+    # Create a heartbeat timeout error without changing the machine state.
+    def create_heartbeat_timeout_error(self) -> MachineError:
         raised_at = datetime.now(UTC)
-        self.add_error(
-            MachineError(
-                error_id=f"heartbeat-timeout-{uuid4()}",
-                error_code=DiagnosticCode.DEVICE_COMMUNICATION_LOST.value,
-                error_message="No device report received before the heartbeat deadline",
-                error_source=ErrorSource.HEARTBEAT_MONITOR,
-                raised_at=raised_at,
-            )
+        return MachineError(
+            error_id=f"heartbeat-timeout-{uuid4()}",
+            error_code=DiagnosticCode.DEVICE_COMMUNICATION_LOST.value,
+            error_message="No device report received before the heartbeat deadline",
+            error_source=ErrorSource.HEARTBEAT_MONITOR,
+            raised_at=raised_at,
         )
 
-    def add_error(self, error: MachineError):
+    # Add one active error unless it is already present.
+    def add_error(self, error: MachineError) -> None:
         self.is_error = True
         if error.error_id not in self.error_list:
             self.error_list[error.error_id] = error
         else:
             print(f"Error {error.error_id} already exists")
         
-    def remove_error(self, error_id: str):
+    # Resolve and remove one active in-memory error.
+    def remove_error(self, error_id: str) -> None:
         error = self.error_list.get(error_id)
 
         if error is None:
@@ -160,4 +146,3 @@ class Machine:
 
         if not self.error_list:
             self.is_error = False
-

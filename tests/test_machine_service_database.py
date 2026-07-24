@@ -1,5 +1,4 @@
 # Verify the complete MachineService persistence flow with in-memory SQLite.
-# 使用内存 SQLite 验证 MachineService 的完整持久化流程。
 
 import json
 from collections.abc import Generator
@@ -43,7 +42,7 @@ class StubMachineMonitor:
     def remove_machine(self, machine_id: str) -> None:
         self.removed_machine_ids.append(machine_id)
 
-    def update_machine(self, machine_id: str) -> None:
+    def update_machine(self, machine_id: str, _recorded_at: datetime | None) -> None:
         self.updated_machine_ids.append(machine_id)
 
     def start_monitor(self) -> None:
@@ -51,7 +50,6 @@ class StubMachineMonitor:
 
 
 # Replace the production SessionFactory with one shared in-memory database.
-# 用一个共享的内存数据库替换生产环境的 SessionFactory。
 @pytest.fixture
 def database_session_factory(monkeypatch: pytest.MonkeyPatch) -> Generator[sessionmaker[Session], None, None]:
     test_engine = create_engine(
@@ -70,7 +68,6 @@ def database_session_factory(monkeypatch: pytest.MonkeyPatch) -> Generator[sessi
 
 
 # Provide a disposable snapshot directory inside the writable test folder.
-# 在可写的测试目录中提供一个用后即删的快照目录。
 @pytest.fixture
 def fault_snapshot_directory() -> Generator[Path, None, None]:
     directory = Path(__file__).parent / "artifacts"
@@ -99,8 +96,8 @@ def test_machine_service_persists_complete_lifecycle(database_session_factory: s
     assert service.handle_periodic_report(first_periodic_report) is ReportProcessingResult.ACCEPTED
     assert service.handle_periodic_report(first_periodic_report) is ReportProcessingResult.DUPLICATE
 
-    assert service.handle_heartbeat_timeout("washer-01")
     machine = service.machines_registry["washer-01"]
+    assert service.handle_heartbeat_timeout("washer-01", machine.recorded_at)
     assert not machine.is_online
 
     recovery_report = WasherPeriodicReport(
@@ -136,13 +133,21 @@ def test_machine_service_persists_complete_lifecycle(database_session_factory: s
         report_id="error-report-01",
         recorded_at=recorded_at + timedelta(seconds=25),
         error_id="door-error-01",
-        error_code="door_fault",
+        error_code=DiagnosticCode.DOOR_INTERLOCK_LOST.value,
         error_message="Door did not lock",
         error_source=ErrorSource.DEVICE,
         general_sensor_readings={"vibration": 0.1, "door_locked": False},
         special_sensor_readings={"water_level": 45.0, "water_temperature": 39.0},
     )
     assert service.handle_error_report(error_report) is ReportProcessingResult.ACCEPTED
+    duplicate_error_report = error_report.model_copy(
+        update={
+            "report_id": "error-report-02",
+            "recorded_at": recorded_at + timedelta(seconds=26),
+        }
+    )
+    assert service.handle_error_report(duplicate_error_report) is ReportProcessingResult.DUPLICATE
+    assert machine.recorded_at == error_report.recorded_at
 
     snapshot_files = list(fault_snapshot_directory.glob("fault-*.json"))
     assert len(snapshot_files) == 1
@@ -217,6 +222,44 @@ def test_machine_service_persists_complete_lifecycle(database_session_factory: s
     assert service.get_fault_context(999_999, 5) is None
 
 
+# Keep an accepted device fault when its optional JSON snapshot cannot be written.
+def test_fault_snapshot_write_failure_does_not_reject_error_report(
+    database_session_factory: sessionmaker[Session],
+    fault_snapshot_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monitor = StubMachineMonitor()
+    service = MachineService(monitor, fault_snapshot_directory)
+    assert service.machine_register("washer-snapshot", MachineType.WASHER)
+
+    def fail_to_save_snapshot(*_args: object) -> Path:
+        raise OSError("Test snapshot write failure")
+
+    monkeypatch.setattr(machine_service_module, "save_fault_snapshot", fail_to_save_snapshot)
+    error_report = WasherErrorReport(
+        machine_id="washer-snapshot",
+        machine_type=MachineType.WASHER,
+        report_id="snapshot-error-report-01",
+        recorded_at=datetime(2026, 7, 22, 13, 0, tzinfo=UTC),
+        error_id="snapshot-error-01",
+        error_code=DiagnosticCode.DOOR_INTERLOCK_LOST.value,
+        error_message="Door interlock was lost",
+        error_source=ErrorSource.DEVICE,
+        general_sensor_readings={"vibration": 0.1, "door_locked": False},
+        special_sensor_readings={"water_level": 0.0, "water_temperature": 20.0},
+    )
+
+    assert service.handle_error_report(error_report) is ReportProcessingResult.ACCEPTED
+    assert "snapshot-error-01" in service.machines_registry["washer-snapshot"].error_list
+
+    with database_session_factory() as database_session:
+        fault_records = database_session.scalars(select(FaultEventRecord)).all()
+
+    assert [fault.error_id for fault in fault_records] == ["snapshot-error-01"]
+    assert "Failed to save fault snapshot for fault" in caplog.text
+
+
 def test_machine_service_reactivates_existing_machine_record(database_session_factory: sessionmaker[Session]) -> None:
     service = MachineService(StubMachineMonitor())
 
@@ -232,6 +275,81 @@ def test_machine_service_reactivates_existing_machine_record(database_session_fa
     assert machine_records[0].is_registered
 
 
+# Restore persisted current state into a new service instance after a restart.
+def test_machine_service_restores_runtime_state(database_session_factory: sessionmaker[Session]) -> None:
+    original_service = MachineService(StubMachineMonitor())
+    recorded_at = datetime(2026, 7, 23, 12, 0, tzinfo=UTC)
+
+    assert original_service.machine_register("washer-restore", MachineType.WASHER)
+    assert original_service.machine_register("washer-deregistered", MachineType.WASHER)
+    assert original_service.machine_deregister("washer-deregistered")
+
+    periodic_report = WasherPeriodicReport(
+        machine_id="washer-restore",
+        machine_type=MachineType.WASHER,
+        report_id="restore-periodic-01",
+        recorded_at=recorded_at,
+        operation_state=OperationState.RUNNING,
+        cycle_stage=WasherCyclePhase.WASHING,
+        general_sensor_readings={"vibration": 0.1, "door_locked": True},
+        special_sensor_readings={"water_level": 50.0, "water_temperature": 40.0},
+    )
+    assert original_service.handle_periodic_report(periodic_report) is ReportProcessingResult.ACCEPTED
+
+    error_report = WasherErrorReport(
+        machine_id="washer-restore",
+        machine_type=MachineType.WASHER,
+        report_id="restore-error-01",
+        recorded_at=recorded_at + timedelta(seconds=5),
+        error_id="restore-fault-01",
+        error_code=DiagnosticCode.DOOR_INTERLOCK_LOST.value,
+        error_message="Door interlock lost",
+        error_source=ErrorSource.DEVICE,
+        general_sensor_readings={"vibration": 0.1, "door_locked": False},
+        special_sensor_readings={"water_level": 50.0, "water_temperature": 40.0},
+    )
+    assert original_service.handle_error_report(error_report) is ReportProcessingResult.ACCEPTED
+    assert original_service.acknowledge_error("washer-restore", "restore-fault-01")
+
+    restored_monitor = StubMachineMonitor()
+    restored_service = MachineService(restored_monitor)
+    restored_service.restore_from_database()
+
+    assert "washer-deregistered" not in restored_service.machines_registry
+    machine = restored_service.machines_registry["washer-restore"]
+    assert machine.is_registered
+    assert not machine.is_online
+    assert machine.registered_at is not None
+    assert machine.registered_at.tzinfo is UTC
+    assert machine.operation_state is OperationState.RUNNING
+    assert machine.cycle_stage is WasherCyclePhase.WASHING
+    assert machine.recorded_at == error_report.recorded_at
+    assert machine.latest_reading is not None
+    assert not machine.latest_reading.general_readings.door_locked
+    assert machine.latest_reading.special_readings.water_temperature == 40.0
+    assert machine.error_list["restore-fault-01"].is_acknowledged
+    assert restored_monitor.added_machine_ids == ["washer-restore"]
+    assert restored_monitor.is_working
+
+
+# Read current machine status only from the in-memory runtime state.
+def test_current_machine_queries_use_runtime_state(database_session_factory: sessionmaker[Session]) -> None:
+    service = MachineService(StubMachineMonitor())
+    assert service.machine_register("washer-current", MachineType.WASHER)
+
+    machine = service.machines_registry["washer-current"]
+    machine.update_state(OperationState.RUNNING, WasherCyclePhase.WASHING)
+
+    machine_statuses = service.list_machines()
+    machine_status = service.get_machine("washer-current")
+
+    assert len(machine_statuses) == 1
+    assert machine_status is not None
+    assert machine_status.operation_state is OperationState.RUNNING
+    assert machine_status.cycle_stage == WasherCyclePhase.WASHING.value
+    assert machine_statuses[0] == machine_status
+
+
 def test_device_error_resolution_updates_database_and_memory(database_session_factory: sessionmaker[Session]) -> None:
     service = MachineService(StubMachineMonitor())
     recorded_at = datetime(2026, 7, 22, 13, 0, tzinfo=UTC)
@@ -243,7 +361,7 @@ def test_device_error_resolution_updates_database_and_memory(database_session_fa
         report_id="error-report-02",
         recorded_at=recorded_at,
         error_id="water-error-01",
-        error_code="water_fault",
+        error_code=DiagnosticCode.WASHER_WATER_TEMPERATURE_HIGH.value,
         error_message="Water level is invalid",
         error_source=ErrorSource.DEVICE,
         general_sensor_readings={"vibration": 0.1, "door_locked": True},
@@ -265,15 +383,28 @@ def test_device_error_resolution_updates_database_and_memory(database_session_fa
     )
     assert service.handle_error_resolution_report(resolution_report) is ReportProcessingResult.ACCEPTED
     machine = service.machines_registry["washer-02"]
+    older_resolution_report = resolution_report.model_copy(
+        update={
+            "report_id": "resolution-old",
+            "recorded_at": resolution_report.recorded_at - timedelta(seconds=1),
+        }
+    )
+    assert service.handle_error_resolution_report(older_resolution_report) is ReportProcessingResult.DUPLICATE
     assert "water-error-01" not in machine.error_list
+    assert machine.operation_state is OperationState.IDLE
+    assert machine.cycle_stage is None
     assert machine.recorded_at == resolution_report.recorded_at
     assert machine.latest_reading is not None
     assert machine.latest_reading.special_readings.water_temperature == 20.0
 
     with database_session_factory() as database_session:
+        machine_record = database_session.get(MachineRecord, "washer-02")
         fault_event = database_session.scalar(select(FaultEventRecord).where(FaultEventRecord.error_id == "water-error-01"))
         recovery_reading = database_session.scalar(select(SensorReadingRecord).where(SensorReadingRecord.report_id == "resolution-02"))
 
+    assert machine_record is not None
+    assert machine_record.operation_state is OperationState.IDLE
+    assert machine_record.cycle_stage is None
     assert fault_event is not None
     assert fault_event.resolved_at is not None
     assert fault_event.resolution_message == "Water sensor recovered"
@@ -322,7 +453,7 @@ def test_periodic_reports_create_deduplicate_and_resolve_sensor_fault(database_s
     assert len(sensor_faults) == 1
     assert sensor_faults[0].error_source is ErrorSource.ANALYTICS
     assert sensor_faults[0].resolved_at is not None
-    assert sensor_faults[0].resolution_message == "Sensor readings returned to normal"
+    assert sensor_faults[0].resolution_message == "Fault detection condition is no longer active"
 
 
 def test_state_report_gaps_are_stored_as_data_events(database_session_factory: sessionmaker[Session]) -> None:

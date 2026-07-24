@@ -1,5 +1,4 @@
 # Configure the SQLite engine and database session lifecycle.
-# 配置 SQLite 引擎和数据库会话生命周期。
 
 from collections.abc import Generator
 from sqlite3 import Connection as SQLiteConnection
@@ -32,7 +31,6 @@ SessionFactory = sessionmaker(
 
 
 # Enforce declared foreign keys for every SQLite connection.
-# 为每个 SQLite 连接启用已声明的外键约束。
 @event.listens_for(Engine, "connect")
 def enable_sqlite_foreign_keys(database_connection: Any,_connection_record: Any) -> None:
     if not isinstance(database_connection, SQLiteConnection):
@@ -44,14 +42,12 @@ def enable_sqlite_foreign_keys(database_connection: Any,_connection_record: Any)
 
 
 # Provide one session to a request or service operation.
-# 为一次请求或服务操作提供一个数据库会话。
 def get_database_session() -> Generator[Session, None, None]:
     with SessionFactory() as database_session:
         yield database_session
 
 
 # Create the currently declared tables during explicit application setup.
-# 在显式的应用初始化阶段创建当前声明的表。
 def initialize_database() -> None:
     from app.database import models  # noqa: F401
 
