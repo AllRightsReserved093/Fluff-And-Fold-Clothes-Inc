@@ -1,4 +1,5 @@
-# Fluff and Fold Clothes Inc
+# Laundry Equipment Monitoring System — Fluff & Fold Clothes Inc.
+FastAPI / SQLAlchemy / SQLite / Pydantic / pytest / Python Concurrency | Backend Systems Prototype
 
 A backend prototype for monitoring washers and dryers from an on-premises laundromat office computer. FastAPI receives machine reports, SQLite stores current snapshots and historical records, and heartbeat monitoring and sensor rules surface, acknowledge, and resolve machine faults.
 
